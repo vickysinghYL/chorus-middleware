@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ErrorLogService, ErrorLogData } from './error-log.service';
 import * as crypto from 'crypto';
-import fetch from 'node-fetch';
+import * as fetch from 'node-fetch';
 
 interface TripData {
   toteId: string;
