@@ -61,8 +61,7 @@ export class ChorusApiService {
   private readonly TOKEN_VALIDITY_SECONDS = 3600; // 1 hour
   private readonly REFRESH_BUFFER_SECONDS = 300; // 5 minutes
 
-  // Request timeout and retry configuration
-  private readonly REQUEST_TIMEOUT_MS = 30000; // 30 seconds
+  // Retry configuration
   private readonly MAX_RETRIES = 3;
   private readonly BASE_RETRY_DELAY_MS = 500; // 500ms (reduced from 1 second)
   private readonly MAX_RETRY_DELAY_MS = 3000; // 3 seconds (reduced from 10 seconds)
@@ -153,10 +152,6 @@ export class ChorusApiService {
       try {
         this.logger.log(`${this.TAG}: Making ${method} request to ${url} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
 
-        // Create AbortController for timeout
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), this.REQUEST_TIMEOUT_MS);
-
         const response = await fetch(url, {
           method: method,
           headers: {
@@ -164,11 +159,8 @@ export class ChorusApiService {
             'Content-Type': 'application/json',
             'Accept': 'application/json'
           },
-          body: payload ? JSON.stringify(payload) : undefined,
-          signal: controller.signal
+          body: payload ? JSON.stringify(payload) : undefined
         });
-
-        clearTimeout(timeoutId);
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -249,45 +241,14 @@ export class ChorusApiService {
         return responseData;
 
       } catch (error) {
-        // Handle fetch timeout (AbortError) and network errors
-        if (error.name === 'AbortError') {
-          const timeoutError = new ChorusApiError(
-            `Request timeout after ${this.REQUEST_TIMEOUT_MS}ms`,
-            endpoint,
-            408,
-            payload,
-            false,
-            payload?.assetIdentifier?.customerId,
-            payload?.tripIdentifier?.customerId || payload?.trip?.customerId
-          );
-          
-          this.logger.error(`${this.TAG}: Request timeout: ${timeoutError.message}`);
-          
-          // Log timeout error
-          try {
-            await this.errorLogService.createErrorLog({
-              endpoint,
-              errorType: 'TIMEOUT_ERROR',
-              statusCode: 408,
-              errorMessage: timeoutError.message,
-              requestPayload: payload,
-              toteId: payload?.assetIdentifier?.customerId,
-              olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
-            });
-          } catch (dbError) {
-            this.logger.error(`${this.TAG}: Failed to log timeout error to database:`, dbError);
-          }
-          
-          lastError = timeoutError;
-        } else {
-          // Handle network errors (server unreachable, DNS failures, etc.)
-          const isNetworkError = error.code === 'ENOTFOUND' || 
-                                error.code === 'ECONNREFUSED' || 
-                                error.code === 'ECONNRESET' ||
-                                error.message?.includes('fetch') ||
-                                error.message?.includes('network');
-          
-          if (isNetworkError) {
+        // Handle network errors (server unreachable, DNS failures, etc.)
+        const isNetworkError = error.code === 'ENOTFOUND' || 
+                              error.code === 'ECONNREFUSED' || 
+                              error.code === 'ECONNRESET' ||
+                              error.message?.includes('fetch') ||
+                              error.message?.includes('network');
+        
+        if (isNetworkError) {
             const networkError = new ChorusApiError(
               `Network error: ${error.message}`,
               endpoint,
@@ -347,7 +308,6 @@ export class ChorusApiService {
             
             lastError = otherError;
           }
-        }
 
         // Check if error is retryable
         const isRetryable = this.isRetryableError(lastError.statusCode);
