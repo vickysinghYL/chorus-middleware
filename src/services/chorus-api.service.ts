@@ -62,7 +62,7 @@ export class ChorusApiService {
   private readonly REFRESH_BUFFER_SECONDS = 300; // 5 minutes
 
   // Retry configuration
-  private readonly MAX_RETRIES = 3;
+  private readonly MAX_RETRIES = 2;
   private readonly BASE_RETRY_DELAY_MS = 500; // 500ms (reduced from 1 second)
   private readonly MAX_RETRY_DELAY_MS = 3000; // 3 seconds (reduced from 10 seconds)
 
@@ -148,9 +148,9 @@ export class ChorusApiService {
 
     let lastError: any = null;
     
-    for (let attempt = 0; attempt <= this.MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
       try {
-        this.logger.log(`${this.TAG}: Making ${method} request to ${url} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+        this.logger.log(`${this.TAG}: Making ${method} request to ${url} (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
 
         const response = await fetch(url, {
           method: method,
@@ -213,13 +213,13 @@ export class ChorusApiService {
           );
 
           // If not retryable or this is the last attempt, throw the error
-          if (!isRetryable || attempt === this.MAX_RETRIES) {
+          if (!isRetryable || attempt === this.MAX_RETRIES - 1) {
             throw lastError;
           }
 
           // If retryable, wait before retrying
           const retryDelay = this.calculateRetryDelay(attempt);
-          this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${response.status} ${response.statusText} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+          this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${response.status} ${response.statusText} (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
           await this.delay(retryDelay);
           continue;
         }
@@ -313,13 +313,13 @@ export class ChorusApiService {
         const isRetryable = this.isRetryableError(lastError.statusCode);
         
         // If not retryable or this is the last attempt, throw the error
-        if (!isRetryable || attempt === this.MAX_RETRIES) {
+        if (!isRetryable || attempt === this.MAX_RETRIES - 1) {
           throw lastError;
         }
 
         // If retryable, wait before retrying
         const retryDelay = this.calculateRetryDelay(attempt);
-        this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${isRetryable ? 'retryable' : 'non-retryable'} error: ${lastError.message} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+        this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${isRetryable ? 'retryable' : 'non-retryable'} error: ${lastError.message} (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
         await this.delay(retryDelay);
       }
     }
