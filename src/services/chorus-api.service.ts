@@ -26,14 +26,18 @@ class ChorusApiError extends Error {
   public readonly endpoint: string;
   public readonly statusCode: number;
   public readonly requestPayload?: any;
+  public readonly toteId?: string;
+  public readonly olpn?: string;
 
-  constructor(message: string, endpoint: string, statusCode: number, requestPayload?: any, isLogged: boolean = false) {
+  constructor(message: string, endpoint: string, statusCode: number, requestPayload?: any, isLogged: boolean = false, toteId?: string, olpn?: string) {
     super(message);
     this.name = 'ChorusApiError';
     this.isLogged = isLogged;
     this.endpoint = endpoint;
     this.statusCode = statusCode;
     this.requestPayload = requestPayload;
+    this.toteId = toteId;
+    this.olpn = olpn;
   }
 }
 
@@ -56,6 +60,14 @@ export class ChorusApiService {
   private readonly SCOPE = "https://www.googleapis.com/auth/cloud-platform";
   private readonly TOKEN_VALIDITY_SECONDS = 3600; // 1 hour
   private readonly REFRESH_BUFFER_SECONDS = 300; // 5 minutes
+
+  // Request timeout and retry configuration
+  private readonly REQUEST_TIMEOUT_MS = 30000; // 30 seconds
+  private readonly MAX_RETRIES = 3;
+  private readonly BASE_RETRY_DELAY_MS = 500; // 500ms (reduced from 1 second)
+  private readonly MAX_RETRY_DELAY_MS = 3000; // 3 seconds (reduced from 10 seconds)
+
+
 
   // Token management
   private currentToken: string | null = null;
@@ -135,64 +147,261 @@ export class ChorusApiService {
     const authHeader = await this.getAuthHeader();
     const url = `${this.BASE_URL}${endpoint}`;
 
-    this.logger.log(`${this.TAG}: Making ${method} request to ${url}`);
-
-    const response = await fetch(url, {
-      method: method,
-      headers: {
-        'Authorization': authHeader,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: payload ? JSON.stringify(payload) : undefined
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      this.logger.error(`${this.TAG}: API request failed: ${response.status} ${response.statusText}`, errorText);
-      
-      // Log error to database
+    let lastError: any = null;
+    
+    for (let attempt = 0; attempt <= this.MAX_RETRIES; attempt++) {
       try {
-        await this.errorLogService.createErrorLog({
-          endpoint,
-          errorType: 'API_ERROR',
-          statusCode: response.status,
-          errorMessage: `Chorus API Error (${response.status}): ${errorText}`,
-          requestPayload: payload,
+        this.logger.log(`${this.TAG}: Making ${method} request to ${url} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+
+        // Create AbortController for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.REQUEST_TIMEOUT_MS);
+
+        const response = await fetch(url, {
+          method: method,
+          headers: {
+            'Authorization': authHeader,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: payload ? JSON.stringify(payload) : undefined,
+          signal: controller.signal
         });
-      } catch (dbError) {
-        this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          const isTimeout = this.isTimeoutError(response.status, errorText);
+          const isRetryable = this.isRetryableError(response.status);
+          
+          this.logger.error(`${this.TAG}: API request failed: ${response.status} ${response.statusText}`, errorText);
+          
+          // Extract toteId and olpn from payload for better error logging
+          let toteId: string | undefined;
+          let olpn: string | undefined;
+          
+          if (payload) {
+            // Extract toteId from assetIdentifier
+            if (payload.assetIdentifier?.customerId) {
+              toteId = payload.assetIdentifier.customerId;
+            }
+            
+            // Extract olpn from tripIdentifier or trip.customerId
+            if (payload.tripIdentifier?.customerId) {
+              olpn = payload.tripIdentifier.customerId;
+            } else if (payload.trip?.customerId) {
+              olpn = payload.trip.customerId;
+            }
+          }
+          
+          // Log error to database with extracted context
+          try {
+            await this.errorLogService.createErrorLog({
+              endpoint,
+              errorType: isTimeout ? 'TIMEOUT_ERROR' : 'API_ERROR',
+              statusCode: response.status,
+              errorMessage: `Chorus API Error (${response.status}): ${errorText}`,
+              requestPayload: payload,
+              toteId,
+              olpn,
+            });
+          } catch (dbError) {
+            this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
+          }
+          
+          lastError = new ChorusApiError(
+            `Chorus API Error (${response.status}): ${errorText}`,
+            endpoint,
+            response.status,
+            payload,
+            true, // Mark as already logged
+            toteId,
+            olpn
+          );
+
+          // If not retryable or this is the last attempt, throw the error
+          if (!isRetryable || attempt === this.MAX_RETRIES) {
+            throw lastError;
+          }
+
+          // If retryable, wait before retrying
+          const retryDelay = this.calculateRetryDelay(attempt);
+          this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${response.status} ${response.statusText} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+          await this.delay(retryDelay);
+          continue;
+        }
+
+        // Handle cases where the response might be empty (e.g., a 204 No Content)
+        const contentType = response.headers.get("content-type");
+        let responseData;
+        
+        if (contentType && contentType.indexOf("application/json") !== -1) {
+          responseData = await response.json();
+          this.logger.log(`${this.TAG}: JSON response received`);
+          this.logger.log(`Response data: ${JSON.stringify(responseData, null, 2)}`);
+        } else {
+          responseData = await response.text();
+          this.logger.log(`${this.TAG}: Text response received`);
+          this.logger.log(`Response data: ${responseData}`);
+        }
+        
+        return responseData;
+
+      } catch (error) {
+        // Handle fetch timeout (AbortError) and network errors
+        if (error.name === 'AbortError') {
+          const timeoutError = new ChorusApiError(
+            `Request timeout after ${this.REQUEST_TIMEOUT_MS}ms`,
+            endpoint,
+            408,
+            payload,
+            false,
+            payload?.assetIdentifier?.customerId,
+            payload?.tripIdentifier?.customerId || payload?.trip?.customerId
+          );
+          
+          this.logger.error(`${this.TAG}: Request timeout: ${timeoutError.message}`);
+          
+          // Log timeout error
+          try {
+            await this.errorLogService.createErrorLog({
+              endpoint,
+              errorType: 'TIMEOUT_ERROR',
+              statusCode: 408,
+              errorMessage: timeoutError.message,
+              requestPayload: payload,
+              toteId: payload?.assetIdentifier?.customerId,
+              olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
+            });
+          } catch (dbError) {
+            this.logger.error(`${this.TAG}: Failed to log timeout error to database:`, dbError);
+          }
+          
+          lastError = timeoutError;
+        } else {
+          // Handle network errors (server unreachable, DNS failures, etc.)
+          const isNetworkError = error.code === 'ENOTFOUND' || 
+                                error.code === 'ECONNREFUSED' || 
+                                error.code === 'ECONNRESET' ||
+                                error.message?.includes('fetch') ||
+                                error.message?.includes('network');
+          
+          if (isNetworkError) {
+            const networkError = new ChorusApiError(
+              `Network error: ${error.message}`,
+              endpoint,
+              0, // Status code 0 for network errors
+              payload,
+              false,
+              payload?.assetIdentifier?.customerId,
+              payload?.tripIdentifier?.customerId || payload?.trip?.customerId
+            );
+            
+            this.logger.error(`${this.TAG}: Network error: ${networkError.message}`);
+            
+            // Log network error
+            try {
+              await this.errorLogService.createErrorLog({
+                endpoint,
+                errorType: 'NETWORK_ERROR',
+                statusCode: 0,
+                errorMessage: networkError.message,
+                requestPayload: payload,
+                toteId: payload?.assetIdentifier?.customerId,
+                olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
+              });
+            } catch (dbError) {
+              this.logger.error(`${this.TAG}: Failed to log network error to database:`, dbError);
+            }
+            
+            lastError = networkError;
+          } else {
+            // Handle other errors (non-retryable)
+            const otherError = new ChorusApiError(
+              `Request failed: ${error.message}`,
+              endpoint,
+              0,
+              payload,
+              false,
+              payload?.assetIdentifier?.customerId,
+              payload?.tripIdentifier?.customerId || payload?.trip?.customerId
+            );
+            
+            this.logger.error(`${this.TAG}: Request failed: ${otherError.message}`);
+            
+            // Log other error
+            try {
+              await this.errorLogService.createErrorLog({
+                endpoint,
+                errorType: 'REQUEST_ERROR',
+                statusCode: 0,
+                errorMessage: otherError.message,
+                requestPayload: payload,
+                toteId: payload?.assetIdentifier?.customerId,
+                olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
+              });
+            } catch (dbError) {
+              this.logger.error(`${this.TAG}: Failed to log request error to database:`, dbError);
+            }
+            
+            lastError = otherError;
+          }
+        }
+
+        // Check if error is retryable
+        const isRetryable = this.isRetryableError(lastError.statusCode);
+        
+        // If not retryable or this is the last attempt, throw the error
+        if (!isRetryable || attempt === this.MAX_RETRIES) {
+          throw lastError;
+        }
+
+        // If retryable, wait before retrying
+        const retryDelay = this.calculateRetryDelay(attempt);
+        this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${isRetryable ? 'retryable' : 'non-retryable'} error: ${lastError.message} (attempt ${attempt + 1}/${this.MAX_RETRIES + 1})`);
+        await this.delay(retryDelay);
       }
-      
-      throw new ChorusApiError(
-        `Chorus API Error (${response.status}): ${errorText}`,
-        endpoint,
-        response.status,
-        payload,
-        true // Mark as already logged
-      );
     }
 
-    // Handle cases where the response might be empty (e.g., a 204 No Content)
-    const contentType = response.headers.get("content-type");
-    let responseData;
-    
-    if (contentType && contentType.indexOf("application/json") !== -1) {
-      responseData = await response.json();
-      this.logger.log(`${this.TAG}: JSON response received`);
-      this.logger.log(`Response data: ${JSON.stringify(responseData, null, 2)}`);
-    } else {
-      responseData = await response.text();
-      this.logger.log(`${this.TAG}: Text response received`);
-      this.logger.log(`Response data: ${responseData}`);
-    }
-    
-    return responseData;
+    // This should never be reached, but just in case
+    throw lastError;
   }
 
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+
+  // ===========================
+  // RETRY LOGIC
+  // ===========================
+
+  private isRetryableError(statusCode: number): boolean {
+    // Only retry on timeout errors (408, 504) and server unreachable (0 for network errors)
+    // Do NOT retry on client errors like 404 (Not Found) or 409 (Conflict)
+    return statusCode === 408 || statusCode === 504 || statusCode === 0;
+  }
+
+  private isTimeoutError(statusCode: number, errorMessage: string): boolean {
+    return statusCode === 504 || 
+           statusCode === 408 || 
+           errorMessage.toLowerCase().includes('timeout') ||
+           errorMessage.toLowerCase().includes('gateway timeout');
+  }
+
+  private calculateRetryDelay(attempt: number): number {
+    // Exponential backoff with jitter
+    const exponentialDelay = Math.min(
+      this.BASE_RETRY_DELAY_MS * Math.pow(2, attempt),
+      this.MAX_RETRY_DELAY_MS
+    );
+    
+    // Add jitter (±25% random variation)
+    const jitter = exponentialDelay * 0.25 * (Math.random() - 0.5);
+    return Math.max(exponentialDelay + jitter, this.BASE_RETRY_DELAY_MS);
+  }
+
+
 
   private async logWorkflowError(
     error: any,
@@ -210,16 +419,20 @@ export class ChorusApiService {
       return;
     }
 
+    // Debug logging to ensure parameters are being passed correctly
+    this.logger.log(`${this.TAG}: Logging workflow error - toteId: "${context.toteId}", olpn: "${context.olpn}", step: "${context.step}"`);
+
     try {
       await this.errorLogService.createErrorLog({
-        endpoint: 'workflow',
+        endpoint: error instanceof ChorusApiError ? error.endpoint : 'workflow',
         errorType: 'WORKFLOW_ERROR',
-        statusCode: 0,
+        statusCode: error instanceof ChorusApiError ? error.statusCode : 0,
         errorMessage: error.message || 'Unknown workflow error',
-        requestPayload: context.requestPayload,
-        toteId: context.toteId,
-        olpn: context.olpn,
+        requestPayload: error instanceof ChorusApiError ? error.requestPayload : context.requestPayload,
+        toteId: error instanceof ChorusApiError ? error.toteId : context.toteId,
+        olpn: error instanceof ChorusApiError ? error.olpn : context.olpn,
       });
+      this.logger.log(`${this.TAG}: Successfully logged workflow error to database`);
     } catch (dbError) {
       this.logger.error(`${this.TAG}: Failed to log workflow error to database:`, dbError);
     }
@@ -271,6 +484,12 @@ export class ChorusApiService {
         }
       });
     }
+    
+    // Debug logging
+    this.logger.log(`${this.TAG}: listAllTripsInTransit for ${toteId} - Found ${customerIds.length} trips`);
+    this.logger.log(`${this.TAG}: customerIds: ${JSON.stringify(customerIds)}`);
+    this.logger.log(`${this.TAG}: toteOlpnPairs: ${JSON.stringify(toteOlpnPairs)}`);
+    
     return { customerIds, toteOlpnPairs, raw: data };
   }
 
@@ -386,7 +605,10 @@ export class ChorusApiService {
       new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
 
+    const workflowStartTime = Date.now();
     this.logger.log(`${this.TAG}: Starting 'Trip Workflow' for ${sortedTripData.length} trip data entries (sorted by timestamp).`);
+    this.logger.log(`${this.TAG}: Workflow start time: ${new Date(workflowStartTime).toISOString()}`);
+    
     let log: string[] = [];
     let totalProcessed = 0;
     let totalErrors = 0;
@@ -395,8 +617,12 @@ export class ChorusApiService {
       // Process each trip data entry sequentially
       const processTripData = async (tripData: TripData, index: number) => {
         const { toteId, olpn, timestamp } = tripData;
+        const pairStartTime = Date.now();
         const tripLog: string[] = [];
         let tripErrors = 0;
+        
+        this.logger.log(`${this.TAG}: [TIMING] Starting processing for pair ${index + 1}/${sortedTripData.length}: ${toteId}/${olpn} at ${new Date(pairStartTime).toISOString()}`);
+        tripLog.push(`[TIMING] Starting processing for pair ${index + 1}/${sortedTripData.length}: ${toteId}/${olpn} at ${new Date(pairStartTime).toISOString()}`);
         
         try {
           this.logger.log(`${this.TAG}: Processing trip data ${index + 1}/${sortedTripData.length}: ${toteId}/${olpn}`);
@@ -421,7 +647,20 @@ export class ChorusApiService {
             // Step 3: For Each Record - Update Trip Status to "COMPLETED" and End Trip
             for (let i = 0; i < customerIds.length; i++) {
               const oldOlpn = customerIds[i];
+              
+              // Safety check to ensure toteOlpnPairs[i] exists
+              if (!toteOlpnPairs[i]) {
+                this.logger.error(`${this.TAG}: Missing toteOlpnPairs entry for index ${i}`);
+                continue;
+              }
+              
               const [currentToteId, currentOlpn] = toteOlpnPairs[i];
+              
+              // Additional safety check for the destructured values
+              if (!currentToteId || !currentOlpn) {
+                this.logger.error(`${this.TAG}: Invalid toteOlpnPairs entry at index ${i}: [${currentToteId}, ${currentOlpn}]`);
+                continue;
+              }
               
                 this.logger.log(`Processing existing trip ${i + 1}/${customerIds.length}: ${oldOlpn}`);
                 tripLog.push(`Processing existing trip ${i + 1}/${customerIds.length}: ${oldOlpn}`);
@@ -465,8 +704,6 @@ export class ChorusApiService {
                 this.logger.log(`    Trip ended successfully for ${currentToteId}/${currentOlpn}`);
                 tripLog.push(`    Trip ended successfully for ${currentToteId}/${currentOlpn}`);
                 
-                // Small delay between operations
-                await this.delay(100);
                 
                 }catch(error){
                   this.logger.error(`    ERROR: Failed to end trip for ${currentToteId}/${currentOlpn}: ${error.message}`);
@@ -486,8 +723,6 @@ export class ChorusApiService {
                   tripLog.push(`  Skipping remaining steps for ${toteId}/${olpn} due to trip ending failure`);
                 }
               }
-            // Wait for all existing trips to be processed
-            await this.delay(100);
             this.logger.log(`  Completed processing ${customerIds.length} existing trips for ${toteId}`);
             tripLog.push(`  Completed processing ${customerIds.length} existing trips for ${toteId}`);
           } else {
@@ -502,6 +737,12 @@ export class ChorusApiService {
           } else {
             this.logger.log(`${this.TAG}: Step 4 - Skipping new trip creation for ${olpn} due to existing trip processing failures`);
             tripLog.push(`Step 4 - Skipping new trip creation for ${olpn} due to existing trip processing failures`);
+            
+            const pairEndTime = Date.now();
+            const pairDuration = pairEndTime - pairStartTime;
+            this.logger.log(`${this.TAG}: [TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Skipped due to existing trip failures`);
+            tripLog.push(`[TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Skipped due to existing trip failures`);
+            
             return { success: false, log: tripLog, errors: tripErrors };
           }
           
@@ -530,6 +771,12 @@ export class ChorusApiService {
             // If trip creation fails, skip remaining steps for this pair but continue with next pair
             this.logger.log(`  Skipping remaining steps for ${toteId}/${olpn} due to trip creation failure`);
             tripLog.push(`  Skipping remaining steps for ${toteId}/${olpn} due to trip creation failure`);
+            
+            const pairEndTime = Date.now();
+            const pairDuration = pairEndTime - pairStartTime;
+            this.logger.log(`${this.TAG}: [TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Failed at trip creation`);
+            tripLog.push(`[TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Failed at trip creation`);
+            
             return { success: false, log: tripLog, errors: tripErrors };
           }
           
@@ -562,6 +809,12 @@ export class ChorusApiService {
             // If tracking fails, skip to next trip data entry
             this.logger.log(`  Skipping remaining steps for ${toteId}/${olpn} due to tracking failure`);
             tripLog.push(`  Skipping remaining steps for ${toteId}/${olpn} due to tracking failure`);
+            
+            const pairEndTime = Date.now();
+            const pairDuration = pairEndTime - pairStartTime;
+            this.logger.log(`${this.TAG}: [TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Failed at tracking`);
+            tripLog.push(`[TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Failed at tracking`);
+            
             return { success: false, log: tripLog, errors: tripErrors };
           }
           
@@ -591,14 +844,28 @@ export class ChorusApiService {
             // If status update fails, skip remaining steps for this pair but continue with next pair
             this.logger.log(`  Skipping remaining steps for ${toteId}/${olpn} due to status update failure`);
             tripLog.push(`  Skipping remaining steps for ${toteId}/${olpn} due to status update failure`);
+            
+            const pairEndTime = Date.now();
+            const pairDuration = pairEndTime - pairStartTime;
+            this.logger.log(`${this.TAG}: [TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Failed at status update`);
+            tripLog.push(`[TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors) - Failed at status update`);
+            
             return { success: false, log: tripLog, errors: tripErrors };
           }
           
+          const pairEndTime = Date.now();
+          const pairDuration = pairEndTime - pairStartTime;
+          this.logger.log(`${this.TAG}: [TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors)`);
+          tripLog.push(`[TIMING] Completed processing for ${toteId}/${olpn} in ${pairDuration}ms (${tripErrors} errors)`);
           this.logger.log(`Completed processing for ${toteId}/${olpn} (${tripErrors} errors)`);
           tripLog.push(`Completed processing for ${toteId}/${olpn} (${tripErrors} errors)`);
           return { success: tripErrors === 0, log: tripLog, errors: tripErrors };
           
         } catch (error) {
+          const pairEndTime = Date.now();
+          const pairDuration = pairEndTime - pairStartTime;
+          this.logger.error(`${this.TAG}: [TIMING] Failed processing for ${toteId}/${olpn} after ${pairDuration}ms`);
+          tripLog.push(`[TIMING] Failed processing for ${toteId}/${olpn} after ${pairDuration}ms`);
           this.logger.log(`ERROR: Failed to process trip data ${toteId}/${olpn}: ${error.message}`);
           tripLog.push(`ERROR: Failed to process trip data ${toteId}/${olpn}: ${error.message}`);
           
@@ -618,6 +885,9 @@ export class ChorusApiService {
       // Process all trip data entries sequentially
       for (let i = 0; i < sortedTripData.length; i++) {
         const tripData = sortedTripData[i];
+        this.logger.log(`${this.TAG}: [PROGRESS] Processing data entry ${i + 1}/${sortedTripData.length} from array`);
+        log.push(`[PROGRESS] Processing data entry ${i + 1}/${sortedTripData.length} from array`);
+        
         const result = await processTripData(tripData, i);
         
         const { success, log: tripLog, errors } = result;
@@ -625,13 +895,23 @@ export class ChorusApiService {
         totalProcessed += success ? 1 : 0;
         totalErrors += errors;
         
-        // Small delay between processing different trip data entries
-        if (i < sortedTripData.length - 1) {
-          await this.delay(200);
-        }
+        this.logger.log(`${this.TAG}: [PROGRESS] Completed data entry ${i + 1}/${sortedTripData.length} - Success: ${success}, Errors: ${errors}`);
+        log.push(`[PROGRESS] Completed data entry ${i + 1}/${sortedTripData.length} - Success: ${success}, Errors: ${errors}`);
       }
       
+      const workflowEndTime = Date.now();
+      const workflowDuration = workflowEndTime - workflowStartTime;
+      const averageTimePerPair = sortedTripData.length > 0 ? workflowDuration / sortedTripData.length : 0;
+      
+      this.logger.log(`${this.TAG}: [TIMING] 'Trip Workflow' completed in ${workflowDuration}ms`);
+      this.logger.log(`${this.TAG}: [TIMING] Average time per pair: ${averageTimePerPair.toFixed(2)}ms`);
+      this.logger.log(`${this.TAG}: [TIMING] Workflow end time: ${new Date(workflowEndTime).toISOString()}`);
       this.logger.log(`${this.TAG}: 'Trip Workflow' completed. Processed: ${totalProcessed}, Errors: ${totalErrors}`);
+      
+      log.push(`[TIMING] 'Trip Workflow' completed in ${workflowDuration}ms`);
+      log.push(`[TIMING] Average time per pair: ${averageTimePerPair.toFixed(2)}ms`);
+      log.push(`[TIMING] Workflow end time: ${new Date(workflowEndTime).toISOString()}`);
+      
       return {
         success: totalErrors === 0,
         data: log.join('\n'),
@@ -643,12 +923,21 @@ export class ChorusApiService {
       };
 
     } catch (error) {
+      const workflowEndTime = Date.now();
+      const workflowDuration = workflowEndTime - workflowStartTime;
+      
+      this.logger.error(`${this.TAG}: [TIMING] 'Trip Workflow' failed after ${workflowDuration}ms`);
       this.logger.error(`${this.TAG}: 'Trip Workflow' failed:`, error);
+      log.push(`[TIMING] 'Trip Workflow' failed after ${workflowDuration}ms`);
       log.push(`CRITICAL ERROR: ${error.message}`);
       
       // Log critical workflow error to database
+      // For critical workflow errors, we don't have specific toteId/olpn, so we'll log the first trip data if available
+      const firstTripData = sortedTripData.length > 0 ? sortedTripData[0] : null;
       await this.logWorkflowError(error, {
         workflowName: 'Trip Workflow',
+        toteId: firstTripData?.toteId,
+        olpn: firstTripData?.olpn,
         step: 'Workflow Execution',
         requestPayload: { tripDataArray: sortedTripData }
       });

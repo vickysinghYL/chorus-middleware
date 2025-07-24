@@ -1,10 +1,34 @@
 import { Controller, Post, Get, Body, Query, Param, HttpStatus, HttpException } from '@nestjs/common';
 import { ChorusApiService } from '../services/chorus-api.service';
 
+// ===========================
+// DTOs (Data Transfer Objects)
+// ===========================
+
 interface TripDataDto {
   toteId: string;
   olpn: string;
   timestamp: string;
+}
+
+interface CreateTripDto {
+  olpn: string;
+  timestamp?: string;
+}
+
+interface StartTrackingDto {
+  toteId: string;
+  olpn: string;
+}
+
+interface UpdateTripDto {
+  olpn: string;
+  timestamp?: string;
+}
+
+interface EndTrackingDto {
+  toteId: string;
+  olpn: string;
 }
 
 interface TripWorkflowRequestDto {
@@ -19,6 +43,12 @@ interface TripWorkflowResponseDto {
     processed: number;
     errors: number;
   };
+  error?: string;
+}
+
+interface ApiResponseDto<T = any> {
+  success: boolean;
+  result?: T;
   error?: string;
 }
 
@@ -47,25 +77,25 @@ export class ChorusController {
           );
         }
 
-              // Validate timestamp format
-      if (isNaN(Date.parse(tripData.timestamp))) {
-        throw new HttpException(
-          `Invalid timestamp format at index ${i}: ${tripData.timestamp}`,
-          HttpStatus.BAD_REQUEST
-        );
+        // Validate timestamp format
+        if (isNaN(Date.parse(tripData.timestamp))) {
+          throw new HttpException(
+            `Invalid timestamp format at index ${i}: ${tripData.timestamp}`,
+            HttpStatus.BAD_REQUEST
+          );
+        }
       }
-    }
 
-    // Sort trip data by timestamp in ascending order
-    const sortedTripData = [...request.tripData].sort((a, b) => {
-      const timestampA = new Date(a.timestamp).getTime();
-      const timestampB = new Date(b.timestamp).getTime();
-      return timestampA - timestampB;
-    });
+      // Sort trip data by timestamp in ascending order
+      const sortedTripData = [...request.tripData].sort((a, b) => {
+        const timestampA = new Date(a.timestamp).getTime();
+        const timestampB = new Date(b.timestamp).getTime();
+        return timestampA - timestampB;
+      });
 
-    console.log(`Sorted ${sortedTripData.length} trip data entries by timestamp (ascending)`);
-    console.log('First entry:', sortedTripData[0]);
-    console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
+      console.log(`Sorted ${sortedTripData.length} trip data entries by timestamp (ascending)`);
+      console.log('First entry:', sortedTripData[0]);
+      console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
 
     // Execute the workflow with sorted data
     this.chorusApiService.executeTripWorkflow(sortedTripData);
@@ -88,10 +118,15 @@ export class ChorusController {
   // ===========================
 
   @Post('/create-trip')
-  async createTrip(@Body() body: { olpn: string; timestamp?: string }) {
+  async createTrip(@Body() body: CreateTripDto): Promise<ApiResponseDto> {
     try {
       if (!body.olpn) {
         throw new HttpException('OLPN is required', HttpStatus.BAD_REQUEST);
+      }
+      
+      // Validate timestamp if provided
+      if (body.timestamp && isNaN(Date.parse(body.timestamp))) {
+        throw new HttpException('Invalid timestamp format', HttpStatus.BAD_REQUEST);
       }
       
       const timestamp = body.timestamp || new Date().toISOString();
@@ -99,6 +134,10 @@ export class ChorusController {
       
       return { success: true, result };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
       throw new HttpException(
         `Failed to create trip: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -107,7 +146,7 @@ export class ChorusController {
   }
 
   @Post('/start-tracking')
-  async startTracking(@Body() body: { toteId: string; olpn: string }) {
+  async startTracking(@Body() body: StartTrackingDto): Promise<ApiResponseDto> {
     try {
       if (!body.toteId || !body.olpn) {
         throw new HttpException('ToteId and OLPN are required', HttpStatus.BAD_REQUEST);
@@ -117,6 +156,10 @@ export class ChorusController {
       
       return { success: true, result };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
       throw new HttpException(
         `Failed to start tracking: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -125,10 +168,15 @@ export class ChorusController {
   }
 
   @Post('/update-trip-in-transit')
-  async updateTripToInTransit(@Body() body: { olpn: string; timestamp?: string }) {
+  async updateTripToInTransit(@Body() body: UpdateTripDto): Promise<ApiResponseDto> {
     try {
       if (!body.olpn) {
         throw new HttpException('OLPN is required', HttpStatus.BAD_REQUEST);
+      }
+      
+      // Validate timestamp if provided
+      if (body.timestamp && isNaN(Date.parse(body.timestamp))) {
+        throw new HttpException('Invalid timestamp format', HttpStatus.BAD_REQUEST);
       }
       
       const timestamp = body.timestamp || new Date().toISOString();
@@ -136,6 +184,10 @@ export class ChorusController {
       
       return { success: true, result };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
       throw new HttpException(
         `Failed to update trip to IN_TRANSIT: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -144,10 +196,15 @@ export class ChorusController {
   }
 
   @Post('/end-trip')
-  async endTrip(@Body() body: { olpn: string; timestamp?: string }) {
+  async endTrip(@Body() body: UpdateTripDto): Promise<ApiResponseDto> {
     try {
       if (!body.olpn) {
         throw new HttpException('OLPN is required', HttpStatus.BAD_REQUEST);
+      }
+      
+      // Validate timestamp if provided
+      if (body.timestamp && isNaN(Date.parse(body.timestamp))) {
+        throw new HttpException('Invalid timestamp format', HttpStatus.BAD_REQUEST);
       }
       
       const timestamp = body.timestamp || new Date().toISOString();
@@ -155,6 +212,10 @@ export class ChorusController {
       
       return { success: true, result };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
       throw new HttpException(
         `Failed to end trip: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -163,7 +224,7 @@ export class ChorusController {
   }
 
   @Post('/end-tracking')
-  async endTracking(@Body() body: { toteId: string; olpn: string }) {
+  async endTracking(@Body() body: EndTrackingDto): Promise<ApiResponseDto> {
     try {
       if (!body.toteId || !body.olpn) {
         throw new HttpException('ToteId and OLPN are required', HttpStatus.BAD_REQUEST);
@@ -173,6 +234,10 @@ export class ChorusController {
       
       return { success: true, result };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
       throw new HttpException(
         `Failed to end tracking: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -181,7 +246,7 @@ export class ChorusController {
   }
 
   @Get('/list-trips-in-transit')
-  async listTripsInTransit(@Query('toteId') toteId: string) {
+  async listTripsInTransit(@Query('toteId') toteId: string): Promise<ApiResponseDto> {
     try {
       if (!toteId) {
         throw new HttpException('ToteId is required', HttpStatus.BAD_REQUEST);
@@ -191,10 +256,16 @@ export class ChorusController {
       
       return { success: true, result };
     } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
       throw new HttpException(
         `Failed to list trips in transit: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
   }
+
+
 } 
