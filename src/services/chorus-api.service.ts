@@ -22,7 +22,7 @@ interface WorkflowResult {
 }
 
 class ChorusApiError extends Error {
-  public readonly isLogged: boolean;
+  public isLogged: boolean;
   public readonly endpoint: string;
   public readonly statusCode: number;
   public readonly requestPayload?: any;
