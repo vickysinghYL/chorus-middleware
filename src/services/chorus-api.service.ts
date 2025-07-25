@@ -225,6 +225,13 @@ export class ChorusApiService {
       return responseData;
 
     } catch (error) {
+      // If this is already a ChorusApiError that was thrown from the if (!response.ok) block,
+      // just re-throw it without logging again
+      if (error instanceof ChorusApiError) {
+        this.logger.log(`${this.TAG}: Re-throwing ChorusApiError without duplicate logging`);
+        throw error;
+      }
+      
       // Handle network errors (server unreachable, DNS failures, etc.)
       const isNetworkError = error.code === 'ENOTFOUND' || 
                             error.code === 'ECONNREFUSED' || 
