@@ -187,33 +187,33 @@ export class ChorusApiService {
             }
           }
           
-          // Log error to database with extracted context
-          try {
-            await this.errorLogService.createErrorLog({
-              endpoint,
-              errorType: isTimeout ? 'TIMEOUT_ERROR' : 'API_ERROR',
-              statusCode: response.status,
-              errorMessage: `Chorus API Error (${response.status}): ${errorText}`,
-              requestPayload: payload,
-              toteId,
-              olpn,
-            });
-          } catch (dbError) {
-            this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
-          }
-          
           lastError = new ChorusApiError(
             `Chorus API Error (${response.status}): ${errorText}`,
             endpoint,
             response.status,
             payload,
-            true, // Mark as already logged
+            false, // Mark as not logged yet
             toteId,
             olpn
           );
 
-          // If not retryable or this is the last attempt, throw the error
+          // If not retryable or this is the last attempt, log and throw the error
           if (!isRetryable || attempt === this.MAX_RETRIES - 1) {
+            // Log error to database with extracted context (only on final attempt)
+            try {
+              await this.errorLogService.createErrorLog({
+                endpoint,
+                errorType: isTimeout ? 'TIMEOUT_ERROR' : 'API_ERROR',
+                statusCode: response.status,
+                errorMessage: `Chorus API Error (${response.status}): ${errorText}`,
+                requestPayload: payload,
+                toteId,
+                olpn,
+              });
+              lastError.isLogged = true; // Mark as logged
+            } catch (dbError) {
+              this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
+            }
             throw lastError;
           }
 
@@ -249,7 +249,7 @@ export class ChorusApiService {
                               error.message?.includes('network');
         
         if (isNetworkError) {
-            const networkError = new ChorusApiError(
+            lastError = new ChorusApiError(
               `Network error: ${error.message}`,
               endpoint,
               0, // Status code 0 for network errors
@@ -259,27 +259,10 @@ export class ChorusApiService {
               payload?.tripIdentifier?.customerId || payload?.trip?.customerId
             );
             
-            this.logger.error(`${this.TAG}: Network error: ${networkError.message}`);
-            
-            // Log network error
-            try {
-              await this.errorLogService.createErrorLog({
-                endpoint,
-                errorType: 'NETWORK_ERROR',
-                statusCode: 0,
-                errorMessage: networkError.message,
-                requestPayload: payload,
-                toteId: payload?.assetIdentifier?.customerId,
-                olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
-              });
-            } catch (dbError) {
-              this.logger.error(`${this.TAG}: Failed to log network error to database:`, dbError);
-            }
-            
-            lastError = networkError;
+            this.logger.error(`${this.TAG}: Network error: ${lastError.message}`);
           } else {
             // Handle other errors (non-retryable)
-            const otherError = new ChorusApiError(
+            lastError = new ChorusApiError(
               `Request failed: ${error.message}`,
               endpoint,
               0,
@@ -289,31 +272,29 @@ export class ChorusApiService {
               payload?.tripIdentifier?.customerId || payload?.trip?.customerId
             );
             
-            this.logger.error(`${this.TAG}: Request failed: ${otherError.message}`);
-            
-            // Log other error
-            try {
-              await this.errorLogService.createErrorLog({
-                endpoint,
-                errorType: 'REQUEST_ERROR',
-                statusCode: 0,
-                errorMessage: otherError.message,
-                requestPayload: payload,
-                toteId: payload?.assetIdentifier?.customerId,
-                olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
-              });
-            } catch (dbError) {
-              this.logger.error(`${this.TAG}: Failed to log request error to database:`, dbError);
-            }
-            
-            lastError = otherError;
+            this.logger.error(`${this.TAG}: Request failed: ${lastError.message}`);
           }
 
         // Check if error is retryable
         const isRetryable = this.isRetryableError(lastError.statusCode);
         
-        // If not retryable or this is the last attempt, throw the error
+        // If not retryable or this is the last attempt, log and throw the error
         if (!isRetryable || attempt === this.MAX_RETRIES - 1) {
+          // Log error to database (only on final attempt)
+          try {
+            await this.errorLogService.createErrorLog({
+              endpoint,
+              errorType: lastError.statusCode === 0 ? 'NETWORK_ERROR' : 'REQUEST_ERROR',
+              statusCode: lastError.statusCode,
+              errorMessage: lastError.message,
+              requestPayload: payload,
+              toteId: payload?.assetIdentifier?.customerId,
+              olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
+            });
+            lastError.isLogged = true; // Mark as logged
+          } catch (dbError) {
+            this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
+          }
           throw lastError;
         }
 
