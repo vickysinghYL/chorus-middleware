@@ -61,10 +61,7 @@ export class ChorusApiService {
   private readonly TOKEN_VALIDITY_SECONDS = 3600; // 1 hour
   private readonly REFRESH_BUFFER_SECONDS = 300; // 5 minutes
 
-  // Retry configuration
-  private readonly MAX_RETRIES = 2;
-  private readonly BASE_RETRY_DELAY_MS = 500; // 500ms (reduced from 1 second)
-  private readonly MAX_RETRY_DELAY_MS = 3000; // 3 seconds (reduced from 10 seconds)
+
 
 
 
@@ -146,167 +143,141 @@ export class ChorusApiService {
     const authHeader = await this.getAuthHeader();
     const url = `${this.BASE_URL}${endpoint}`;
 
-    let lastError: any = null;
-    
-    for (let attempt = 0; attempt < this.MAX_RETRIES; attempt++) {
-      try {
-        this.logger.log(`${this.TAG}: Making ${method} request to ${url} (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
+    this.logger.log(`${this.TAG}: Making ${method} request to ${url}`);
 
-        const response = await fetch(url, {
-          method: method,
-          headers: {
-            'Authorization': authHeader,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          body: payload ? JSON.stringify(payload) : undefined
-        });
+    try {
+      const response = await fetch(url, {
+        method: method,
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: payload ? JSON.stringify(payload) : undefined
+      });
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          const isTimeout = this.isTimeoutError(response.status, errorText);
-          const isRetryable = this.isRetryableError(response.status);
-          
-          this.logger.error(`${this.TAG}: API request failed: ${response.status} ${response.statusText}`, errorText);
-          
-          // Extract toteId and olpn from payload for better error logging
-          let toteId: string | undefined;
-          let olpn: string | undefined;
-          
-          if (payload) {
-            // Extract toteId from assetIdentifier
-            if (payload.assetIdentifier?.customerId) {
-              toteId = payload.assetIdentifier.customerId;
-            }
-            
-            // Extract olpn from tripIdentifier or trip.customerId
-            if (payload.tripIdentifier?.customerId) {
-              olpn = payload.tripIdentifier.customerId;
-            } else if (payload.trip?.customerId) {
-              olpn = payload.trip.customerId;
-            }
+      if (!response.ok) {
+        const errorText = await response.text();
+        const isTimeout = this.isTimeoutError(response.status, errorText);
+        
+        this.logger.error(`${this.TAG}: API request failed: ${response.status} ${response.statusText}`, errorText);
+        
+        // Extract toteId and olpn from payload for better error logging
+        let toteId: string | undefined;
+        let olpn: string | undefined;
+        
+        if (payload) {
+          // Extract toteId from assetIdentifier
+          if (payload.assetIdentifier?.customerId) {
+            toteId = payload.assetIdentifier.customerId;
           }
           
-          lastError = new ChorusApiError(
-            `Chorus API Error (${response.status}): ${errorText}`,
+          // Extract olpn from tripIdentifier or trip.customerId
+          if (payload.tripIdentifier?.customerId) {
+            olpn = payload.tripIdentifier.customerId;
+          } else if (payload.trip?.customerId) {
+            olpn = payload.trip.customerId;
+          }
+        }
+        
+        const lastError = new ChorusApiError(
+          `Chorus API Error (${response.status}): ${errorText}`,
+          endpoint,
+          response.status,
+          payload,
+          false, // Mark as not logged yet
+          toteId,
+          olpn
+        );
+
+        // Log error to database
+        try {
+          await this.errorLogService.createErrorLog({
             endpoint,
-            response.status,
-            payload,
-            false, // Mark as not logged yet
+            errorType: isTimeout ? 'TIMEOUT_ERROR' : 'API_ERROR',
+            statusCode: response.status,
+            errorMessage: `Chorus API Error (${response.status}): ${errorText}`,
+            requestPayload: payload,
             toteId,
-            olpn
-          );
-
-          // If not retryable or this is the last attempt, log and throw the error
-          if (!isRetryable || attempt === this.MAX_RETRIES - 1) {
-            // Log error to database with extracted context (only on final attempt)
-            try {
-              await this.errorLogService.createErrorLog({
-                endpoint,
-                errorType: isTimeout ? 'TIMEOUT_ERROR' : 'API_ERROR',
-                statusCode: response.status,
-                errorMessage: `Chorus API Error (${response.status}): ${errorText}`,
-                requestPayload: payload,
-                toteId,
-                olpn,
-              });
-              lastError.isLogged = true; // Mark as logged
-            } catch (dbError) {
-              this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
-            }
-            throw lastError;
-          }
-
-          // If retryable, wait before retrying
-          const retryDelay = this.calculateRetryDelay(attempt);
-          this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${response.status} ${response.statusText} (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
-          await this.delay(retryDelay);
-          continue;
+            olpn,
+          });
+          lastError.isLogged = true; // Mark as logged
+        } catch (dbError) {
+          this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
         }
-
-        // Handle cases where the response might be empty (e.g., a 204 No Content)
-        const contentType = response.headers.get("content-type");
-        let responseData;
-        
-        if (contentType && contentType.indexOf("application/json") !== -1) {
-          responseData = await response.json();
-          this.logger.log(`${this.TAG}: JSON response received`);
-          this.logger.log(`Response data: ${JSON.stringify(responseData, null, 2)}`);
-        } else {
-          responseData = await response.text();
-          this.logger.log(`${this.TAG}: Text response received`);
-          this.logger.log(`Response data: ${responseData}`);
-        }
-        
-        return responseData;
-
-      } catch (error) {
-        // Handle network errors (server unreachable, DNS failures, etc.)
-        const isNetworkError = error.code === 'ENOTFOUND' || 
-                              error.code === 'ECONNREFUSED' || 
-                              error.code === 'ECONNRESET' ||
-                              error.message?.includes('fetch') ||
-                              error.message?.includes('network');
-        
-        if (isNetworkError) {
-            lastError = new ChorusApiError(
-              `Network error: ${error.message}`,
-              endpoint,
-              0, // Status code 0 for network errors
-              payload,
-              false,
-              payload?.assetIdentifier?.customerId,
-              payload?.tripIdentifier?.customerId || payload?.trip?.customerId
-            );
-            
-            this.logger.error(`${this.TAG}: Network error: ${lastError.message}`);
-          } else {
-            // Handle other errors (non-retryable)
-            lastError = new ChorusApiError(
-              `Request failed: ${error.message}`,
-              endpoint,
-              0,
-              payload,
-              false,
-              payload?.assetIdentifier?.customerId,
-              payload?.tripIdentifier?.customerId || payload?.trip?.customerId
-            );
-            
-            this.logger.error(`${this.TAG}: Request failed: ${lastError.message}`);
-          }
-
-        // Check if error is retryable
-        const isRetryable = this.isRetryableError(lastError.statusCode);
-        
-        // If not retryable or this is the last attempt, log and throw the error
-        if (!isRetryable || attempt === this.MAX_RETRIES - 1) {
-          // Log error to database (only on final attempt)
-          try {
-            await this.errorLogService.createErrorLog({
-              endpoint,
-              errorType: lastError.statusCode === 0 ? 'NETWORK_ERROR' : 'REQUEST_ERROR',
-              statusCode: lastError.statusCode,
-              errorMessage: lastError.message,
-              requestPayload: payload,
-              toteId: payload?.assetIdentifier?.customerId,
-              olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
-            });
-            lastError.isLogged = true; // Mark as logged
-          } catch (dbError) {
-            this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
-          }
-          throw lastError;
-        }
-
-        // If retryable, wait before retrying
-        const retryDelay = this.calculateRetryDelay(attempt);
-        this.logger.log(`${this.TAG}: Retrying in ${retryDelay}ms after ${isRetryable ? 'retryable' : 'non-retryable'} error: ${lastError.message} (attempt ${attempt + 1}/${this.MAX_RETRIES})`);
-        await this.delay(retryDelay);
+        throw lastError;
       }
-    }
 
-    // This should never be reached, but just in case
-    throw lastError;
+      // Handle cases where the response might be empty (e.g., a 204 No Content)
+      const contentType = response.headers.get("content-type");
+      let responseData;
+      
+      if (contentType && contentType.indexOf("application/json") !== -1) {
+        responseData = await response.json();
+        this.logger.log(`${this.TAG}: JSON response received`);
+        this.logger.log(`Response data: ${JSON.stringify(responseData, null, 2)}`);
+      } else {
+        responseData = await response.text();
+        this.logger.log(`${this.TAG}: Text response received`);
+        this.logger.log(`Response data: ${responseData}`);
+      }
+      
+      return responseData;
+
+    } catch (error) {
+      // Handle network errors (server unreachable, DNS failures, etc.)
+      const isNetworkError = error.code === 'ENOTFOUND' || 
+                            error.code === 'ECONNREFUSED' || 
+                            error.code === 'ECONNRESET' ||
+                            error.message?.includes('fetch') ||
+                            error.message?.includes('network');
+      
+      let lastError: ChorusApiError;
+      
+      if (isNetworkError) {
+        lastError = new ChorusApiError(
+          `Network error: ${error.message}`,
+          endpoint,
+          0, // Status code 0 for network errors
+          payload,
+          false,
+          payload?.assetIdentifier?.customerId,
+          payload?.tripIdentifier?.customerId || payload?.trip?.customerId
+        );
+        
+        this.logger.error(`${this.TAG}: Network error: ${lastError.message}`);
+      } else {
+        // Handle other errors (non-retryable)
+        lastError = new ChorusApiError(
+          `Request failed: ${error.message}`,
+          endpoint,
+          0,
+          payload,
+          false,
+          payload?.assetIdentifier?.customerId,
+          payload?.tripIdentifier?.customerId || payload?.trip?.customerId
+        );
+        
+        this.logger.error(`${this.TAG}: Request failed: ${lastError.message}`);
+      }
+
+      // Log error to database
+      try {
+        await this.errorLogService.createErrorLog({
+          endpoint,
+          errorType: lastError.statusCode === 0 ? 'NETWORK_ERROR' : 'REQUEST_ERROR',
+          statusCode: lastError.statusCode,
+          errorMessage: lastError.message,
+          requestPayload: payload,
+          toteId: payload?.assetIdentifier?.customerId,
+          olpn: payload?.tripIdentifier?.customerId || payload?.trip?.customerId,
+        });
+        lastError.isLogged = true; // Mark as logged
+      } catch (dbError) {
+        this.logger.error(`${this.TAG}: Failed to log error to database:`, dbError);
+      }
+      throw lastError;
+    }
   }
 
   private delay(ms: number): Promise<void> {
@@ -314,32 +285,14 @@ export class ChorusApiService {
   }
 
   // ===========================
-  // RETRY LOGIC
+  // ERROR HANDLING
   // ===========================
-
-  private isRetryableError(statusCode: number): boolean {
-    // Only retry on timeout errors (408, 504) and server unreachable (0 for network errors)
-    // Do NOT retry on client errors like 404 (Not Found) or 409 (Conflict)
-    return statusCode === 408 || statusCode === 504 || statusCode === 0;
-  }
 
   private isTimeoutError(statusCode: number, errorMessage: string): boolean {
     return statusCode === 504 || 
            statusCode === 408 || 
            errorMessage.toLowerCase().includes('timeout') ||
            errorMessage.toLowerCase().includes('gateway timeout');
-  }
-
-  private calculateRetryDelay(attempt: number): number {
-    // Exponential backoff with jitter
-    const exponentialDelay = Math.min(
-      this.BASE_RETRY_DELAY_MS * Math.pow(2, attempt),
-      this.MAX_RETRY_DELAY_MS
-    );
-    
-    // Add jitter (±25% random variation)
-    const jitter = exponentialDelay * 0.25 * (Math.random() - 0.5);
-    return Math.max(exponentialDelay + jitter, this.BASE_RETRY_DELAY_MS);
   }
 
 
