@@ -6,6 +6,9 @@ import { ChorusController } from './controllers/chorus.controller';
 import { ErrorLogService } from './services/error-log.service';
 import { ErrorLogController } from './controllers/error-log.controller';
 import { ChorusErrorLog } from './entities/chorus-error-log.entity';
+import { TripProcessingLog } from './entities/trip-processing-log.entity';
+import { TripProcessingError } from './entities/trip-processing-error.entity';
+import { TripProcessingLogService } from './services/trip-processing-log.service';
 import { join } from 'path';
 
 @Module({
@@ -26,9 +29,9 @@ import { join } from 'path';
         entities: [join(__dirname, './**/**.entity{.ts,.js}')],
         logging: false, // Disable SQL query logging
       }),
-    TypeOrmModule.forFeature([ChorusErrorLog]),
+    TypeOrmModule.forFeature([ChorusErrorLog, TripProcessingLog, TripProcessingError]),
   ],
   controllers: [ChorusController, ErrorLogController],
-  providers: [ChorusApiService, ErrorLogService],
+  providers: [ChorusApiService, ErrorLogService, TripProcessingLogService],
 })
 export class AppModule {} 

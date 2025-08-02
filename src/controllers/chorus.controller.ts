@@ -86,7 +86,6 @@ export class ChorusController {
         }
       }
 
-      // Sort trip data by timestamp in ascending order
       const sortedTripData = [...request.tripData].sort((a, b) => {
         const timestampA = new Date(a.timestamp).getTime();
         const timestampB = new Date(b.timestamp).getTime();
@@ -97,10 +96,67 @@ export class ChorusController {
       console.log('First entry:', sortedTripData[0]);
       console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
 
-    // Execute the workflow with sorted data
+
+    // Execute the workflow (sorting will be done in service)
     this.chorusApiService.executeTripWorkflow(sortedTripData);
       
     return { success: true, data: 'Trip workflow executed successfully' };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      throw new HttpException(
+        `Internal server error: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Post('/process-data-multiprocess')
+  async executeTripWorkflowMultiProcess(@Body() request: TripWorkflowRequestDto): Promise<any> {
+    try {
+      // Validate input
+      if (!request.tripData || !Array.isArray(request.tripData) || request.tripData.length === 0) {
+        throw new HttpException(
+          'Invalid request: tripData must be a non-empty array',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+
+      // Validate each trip data entry
+      for (let i = 0; i < request.tripData.length; i++) {
+        const tripData = request.tripData[i];
+        if (!tripData.toteId || !tripData.olpn || !tripData.timestamp) {
+          throw new HttpException(
+            `Invalid trip data at index ${i}: toteId, olpn, and timestamp are required`,
+            HttpStatus.BAD_REQUEST
+          );
+        }
+
+        // Validate timestamp format
+        if (isNaN(Date.parse(tripData.timestamp))) {
+          throw new HttpException(
+            `Invalid timestamp format at index ${i}: ${tripData.timestamp}`,
+            HttpStatus.BAD_REQUEST
+          );
+        }
+      }
+
+      const sortedTripData = [...request.tripData].sort((a, b) => {
+        const timestampA = new Date(a.timestamp).getTime();
+        const timestampB = new Date(b.timestamp).getTime();
+        return timestampA - timestampB;
+      });
+
+      console.log(`Sorted ${sortedTripData.length} trip data entries by timestamp (ascending)`);
+      console.log('First entry:', sortedTripData[0]);
+      console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
+
+      // Execute the multiprocessing workflow (sorting will be done in service)
+     this.chorusApiService.executeTripWorkflowMultiProcess(sortedTripData);
+      
+     return { success: true, data: 'Trip workflow executed successfully' };
     } catch (error) {
       if (error instanceof HttpException) {
         throw error;
