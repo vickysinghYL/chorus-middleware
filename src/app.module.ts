@@ -10,6 +10,7 @@ import { TripProcessingLog } from './entities/trip-processing-log.entity';
 import { TripProcessingError } from './entities/trip-processing-error.entity';
 import { TripProcessingLogService } from './services/trip-processing-log.service';
 import { join } from 'path';
+import { TripProcessingLogController } from './controllers/trip-processing-log.controller';
 
 @Module({
   imports: [
@@ -31,7 +32,7 @@ import { join } from 'path';
       }),
     TypeOrmModule.forFeature([ChorusErrorLog, TripProcessingLog, TripProcessingError]),
   ],
-  controllers: [ChorusController, ErrorLogController],
+  controllers: [ChorusController, ErrorLogController, TripProcessingLogController],
   providers: [ChorusApiService, ErrorLogService, TripProcessingLogService],
 })
 export class AppModule {} 

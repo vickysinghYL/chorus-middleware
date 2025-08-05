@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Between } from 'typeorm';
 import { TripProcessingLog, TripProcessingStatus } from '../entities/trip-processing-log.entity';
 import { TripProcessingError } from '../entities/trip-processing-error.entity';
 
@@ -218,6 +218,35 @@ export class TripProcessingLogService {
     return await this.tripProcessingLogRepository.find({
       order: { createdAt: 'DESC' },
       take: limit,
+      relations: ['errors']
+    });
+  }
+
+  async getFailedLogsByDate(date: string): Promise<TripProcessingLog[]> {
+    // Parse the date string and create date range for the entire day
+    const startDate = new Date(date);
+    startDate.setHours(0, 0, 0, 0);
+    
+    const endDate = new Date(date);
+    endDate.setHours(23, 59, 59, 999);
+    
+    return await this.tripProcessingLogRepository.find({
+      where: {
+        status: TripProcessingStatus.FAILED,
+        createdAt: Between(startDate, endDate)
+      },
+      order: { createdAt: 'ASC' },
+      relations: ['errors']
+    });
+  }
+
+  /**
+   * Get all processing logs by OLPN
+   */
+  async getLogsByOlpn(olpn: string): Promise<TripProcessingLog[]> {
+    return await this.tripProcessingLogRepository.find({
+      where: { olpn },
+      order: { createdAt: 'DESC' },
       relations: ['errors']
     });
   }
