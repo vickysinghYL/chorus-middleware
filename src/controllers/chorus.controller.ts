@@ -59,7 +59,6 @@ export class ChorusController {
   @Post('/process-data')
   async executeTripWorkflow(@Body() request: TripWorkflowRequestDto): Promise<any> {
     try {
-      console.log('Trip Workflow Request:', request);
       // Validate input
       if (!request.tripData || !Array.isArray(request.tripData) || request.tripData.length === 0) {
         throw new HttpException(
@@ -99,7 +98,7 @@ export class ChorusController {
 
 
     // Execute the workflow (sorting will be done in service)
-    // this.chorusApiService.executeTripWorkflow(sortedTripData);
+    this.chorusApiService.executeTripWorkflow(sortedTripData);
       
     return { success: true, data: 'Trip workflow executed successfully' };
     } catch (error) {
