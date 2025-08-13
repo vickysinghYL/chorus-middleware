@@ -1,11 +1,10 @@
-import { Controller, Get, Post, Query, Param, Body, HttpStatus, HttpException, Res } from '@nestjs/common';
+import { Controller, Get, Post, Query, Param, Body, HttpStatus, HttpException, Res, Logger, Delete } from '@nestjs/common';
 import { TripProcessingLogService } from '../services/trip-processing-log.service';
 import { TripProcessingStatus } from '../entities/trip-processing-log.entity';
 import * as XLSX from 'xlsx';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Response } from 'express';
-import { ConfigService } from '@nestjs/config';
 
 interface TripDataDto {
   toteId: string;
@@ -33,6 +32,7 @@ enum FilterType {
 
 @Controller('trip-processing-logs')
 export class TripProcessingLogController {
+  private readonly logger = new Logger(TripProcessingLogController.name);
   constructor(private readonly tripProcessingLogService: TripProcessingLogService) {}
 
   @Post('/bulk-insert-success')
@@ -67,16 +67,16 @@ export class TripProcessingLogController {
 
       const workflowType = 'MANUAL_INSERT';
       
-      console.log(`Bulk inserting ${request.tripData.length} trip processing logs with SUCCESS status`);
-      console.log('Workflow type:', workflowType);
+      this.logger.log(`Bulk inserting ${request.tripData.length} trip processing logs with SUCCESS status`);
+      this.logger.log(`Workflow type: ${workflowType}`);
 
       // Determine optimal number of workers based on CPU cores
       const cpuCores = require('os').cpus().length;
       const maxWorkers = Math.min(cpuCores, 10); // Use 2 workers for 2 CPU server
       const chunkSize = Math.ceil(request.tripData.length / maxWorkers);
       
-      console.log(`Using ${maxWorkers} workers for parallel processing`);
-      console.log(`Chunk size per worker: ${chunkSize}`);
+      this.logger.log(`Using ${maxWorkers} workers for parallel processing`);
+      this.logger.log(`Chunk size per worker: ${chunkSize}`);
       
       // Create chunks for parallel processing
       const chunks = [];
@@ -84,12 +84,12 @@ export class TripProcessingLogController {
         chunks.push(request.tripData.slice(i, i + chunkSize));
       }
       
-      console.log(`Created ${chunks.length} chunks for parallel processing`);
+      this.logger.log(`Created ${chunks.length} chunks for parallel processing`);
       
       // Process chunks in parallel
       const chunkResults = await Promise.all(
         chunks.map(async (chunk, chunkIndex) => {
-          console.log(`Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length} entries`);
+          this.logger.log(`Processing chunk ${chunkIndex + 1}/${chunks.length} with ${chunk.length} entries`);
           
           const chunkResults = await Promise.all(
             chunk.map(async (tripData, index) => {
@@ -126,7 +126,7 @@ export class TripProcessingLogController {
             })
           );
           
-          console.log(`Completed chunk ${chunkIndex + 1}/${chunks.length} - Processed: ${chunkResults.filter(r => r.status === 'SUCCESS').length}, Failed: ${chunkResults.filter(r => r.status === 'FAILED').length}`);
+          this.logger.log(`Completed chunk ${chunkIndex + 1}/${chunks.length} - Processed: ${chunkResults.filter(r => r.status === 'SUCCESS').length}, Failed: ${chunkResults.filter(r => r.status === 'FAILED').length}`);
           
           return chunkResults;
         })
@@ -205,6 +205,7 @@ export class TripProcessingLogController {
     @Query('endDate') endDate?: string,
   ): Promise<ApiResponseDto> {
     try {
+      this.logger.log(`[ProcessingLogs] Incoming request params: skip=${skip}, limit=${limit}, filterType=${filterType}, value=${value}, startDate=${startDate}, endDate=${endDate}`);
       if (skip < 0) {
         throw new HttpException('Skip must be a non-negative number', HttpStatus.BAD_REQUEST);
       }
@@ -261,9 +262,12 @@ export class TripProcessingLogController {
           throw new HttpException('Invalid filter type', HttpStatus.BAD_REQUEST);
       }
 
+      this.logger.log(`[ProcessingLogs] Computed filters: ${JSON.stringify(filters)}`);
+
       // Calculate page number for serial number calculation
       const pageNum = Math.floor(skip / limit) + 1;
       const result = await this.tripProcessingLogService.getFilteredLogs(pageNum, limit, filters);
+      this.logger.log(`[ProcessingLogs] Retrieved ${result.logs.length} logs (total: ${result.total}) for page ${pageNum} (skip=${skip}, limit=${limit})`);
       
       return {
         success: true,
@@ -315,8 +319,9 @@ export class TripProcessingLogController {
     @Query('endDate') endDate?: string,
   ): Promise<ApiResponseDto> {
     try {
+      this.logger.log(`[Export] Incoming request params: filterType=${filterType}, value=${value}, startDate=${startDate}, endDate=${endDate}`);
       const filters: any = {};
-
+      let filename = '';
       switch (filterType) {
         case FilterType.ALL:
           // No additional filters needed
@@ -326,12 +331,14 @@ export class TripProcessingLogController {
             throw new HttpException('OLPN value is required for OLPN filter', HttpStatus.BAD_REQUEST);
           }
           filters.olpn = value;
+          filename = `processing_logs_${filterType}_${value}.xlsx`;
           break;
         case FilterType.TOTE_ID:
           if (!value) {
             throw new HttpException('Tote ID value is required for Tote ID filter', HttpStatus.BAD_REQUEST);
           }
           filters.toteId = value;
+          filename = `processing_logs_${filterType}_${value}.xlsx`;
           break;
         case FilterType.DATE:
           if (!value) {
@@ -343,6 +350,7 @@ export class TripProcessingLogController {
           }
           filters.startDate = date;
           filters.endDate = new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1); // End of day
+          filename = `processing_logs_${filterType}_${value}.xlsx`;
           break;
         case FilterType.DATE_RANGE:
           if (!startDate || !endDate) {
@@ -358,13 +366,23 @@ export class TripProcessingLogController {
           }
           filters.startDate = start;
           filters.endDate = end;
+          filename = `processing_logs_${filterType}_${startDate}_${endDate}.xlsx`;
           break;
         default:
           throw new HttpException('Invalid filter type', HttpStatus.BAD_REQUEST);
       }
 
+      if (!filename) {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+        filename = `processing_logs_all_${ts}.xlsx`;
+      }
+
+      this.logger.log(`[Export] Computed filters: ${JSON.stringify(filters)}`);
+      this.logger.log(`[Export] Target filename: ${filename}`);
+
       // Get all logs for export (no pagination)
       const result = await this.tripProcessingLogService.getFilteredLogs(1, 10000, filters);
+      this.logger.log(`[Export] Fetched ${result.logs.length} records to export`);
 
       if (result.logs.length === 0) {
         throw new HttpException('No logs found for the specified filters', HttpStatus.NOT_FOUND);
@@ -407,8 +425,6 @@ export class TripProcessingLogController {
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Processing Logs');
 
       // Generate filename and path
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
-      const filename = `processing_logs_${filterType}_${timestamp}.xlsx`;
       const exportsDir = path.join(process.cwd(), 'exports');
       const filePath = path.join(exportsDir, filename);
 
@@ -419,13 +435,19 @@ export class TripProcessingLogController {
 
       // Write file to disk
       XLSX.writeFile(workbook, filePath);
+      this.logger.log('[Export] Excel file written successfully');
+
+      const baseUrl = process.env.SERVER_URL || '';
+      const downloadPath = `/trip-processing-logs/download/${filename}`;
+      const downloadUrl = baseUrl ? `${baseUrl}${downloadPath}` : downloadPath;
+      this.logger.log(`[Export] Download URL: ${downloadUrl}`);
 
       return {
         success: true,
         result: {
           message: `Processing logs exported successfully`,
           filename: filename,
-          downloadUrl: `${process.env.SERVER_URL}/trip-processing-logs/download/${filename}`,
+          downloadUrl: downloadUrl,
           totalRecords: result.logs.length,
           fileSize: fs.statSync(filePath).size,
           exportDate: new Date().toISOString(),
@@ -435,7 +457,7 @@ export class TripProcessingLogController {
       };
 
     } catch (error) {
-      console.error('Error exporting logs:', error);
+      this.logger.error('Error exporting logs:', error as any);
       
       if (error instanceof HttpException) {
         throw error;
@@ -453,9 +475,11 @@ export class TripProcessingLogController {
     try {
       const exportsDir = path.join(process.cwd(), 'exports');
       const filePath = path.join(exportsDir, filename);
+      this.logger.log(`[Download] Attempting to download file: filename=${filename}, filePath=${filePath}`);
 
       // Check if file exists
       if (!fs.existsSync(filePath)) {
+        this.logger.warn(`[Download] File not found: ${filePath}`);
         throw new HttpException('File not found', HttpStatus.NOT_FOUND);
       }
 
@@ -467,6 +491,7 @@ export class TripProcessingLogController {
       // Stream the file to response
       const fileStream = fs.createReadStream(filePath);
       fileStream.pipe(res);
+      this.logger.log('[Download] File stream started successfully');
 
     } catch (error) {
       if (error instanceof HttpException) {
@@ -475,6 +500,70 @@ export class TripProcessingLogController {
       
       throw new HttpException(
         `Failed to download file: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Delete('/cleanup-exports')
+  async cleanupExportFiles(): Promise<ApiResponseDto> {
+    try {
+      this.logger.log('[Cleanup] Starting cleanup of all export files');
+
+      const exportsDir = path.join(process.cwd(), 'exports');
+      
+      // Check if exports directory exists
+      if (!fs.existsSync(exportsDir)) {
+        this.logger.log('[Cleanup] Exports directory does not exist, nothing to clean');
+        return {
+          success: true,
+          result: {
+            message: 'No exports directory found',
+            deletedFiles: 0,
+            totalSize: 0
+          }
+        };
+      }
+
+      const files = fs.readdirSync(exportsDir);
+      let deletedFiles = 0;
+      let totalSize = 0;
+
+      for (const file of files) {
+        const filePath = path.join(exportsDir, file);
+        const stats = fs.statSync(filePath);
+        
+        try {
+          const fileSize = stats.size;
+          fs.unlinkSync(filePath);
+          deletedFiles++;
+          totalSize += fileSize;
+          this.logger.log(`[Cleanup] Deleted file: ${file} (${fileSize} bytes)`);
+        } catch (deleteError) {
+          this.logger.error(`[Cleanup] Failed to delete file ${file}:`, deleteError);
+        }
+      }
+
+      this.logger.log(`[Cleanup] Cleanup completed. Deleted ${deletedFiles} files, freed ${totalSize} bytes`);
+
+      return {
+        success: true,
+        result: {
+          message: `Cleanup completed successfully`,
+          deletedFiles,
+          totalSize
+        }
+      };
+
+    } catch (error) {
+      this.logger.error('[Cleanup] Error during cleanup:', error);
+      
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      throw new HttpException(
+        `Failed to cleanup export files: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
