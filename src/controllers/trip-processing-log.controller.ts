@@ -1,9 +1,11 @@
-import { Controller, Get, Post, Query, Param, Body, HttpStatus, HttpException } from '@nestjs/common';
+import { Controller, Get, Post, Query, Param, Body, HttpStatus, HttpException, Res } from '@nestjs/common';
 import { TripProcessingLogService } from '../services/trip-processing-log.service';
 import { TripProcessingStatus } from '../entities/trip-processing-log.entity';
 import * as XLSX from 'xlsx';
 import * as fs from 'fs';
 import * as path from 'path';
+import { Response } from 'express';
+import { ConfigService } from '@nestjs/config';
 
 interface TripDataDto {
   toteId: string;
@@ -19,6 +21,14 @@ interface ApiResponseDto<T = any> {
   success: boolean;
   result?: T;
   error?: string;
+}
+
+enum FilterType {
+  ALL = 'all',
+  OLPN = 'olpn',
+  TOTE_ID = 'toteId',
+  DATE = 'date',
+  DATE_RANGE = 'dateRange'
 }
 
 @Controller('trip-processing-logs')
@@ -163,6 +173,308 @@ export class TripProcessingLogController {
     } catch (error) {
       throw new HttpException(
         `Failed to get processing statistics: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('/dashboard-stats')
+  async getDashboardStats(): Promise<ApiResponseDto> {
+    try {
+      const stats = await this.tripProcessingLogService.getDashboardStats();
+      
+      return {
+        success: true,
+        result: stats
+      };
+    } catch (error) {
+      throw new HttpException(
+        `Failed to get dashboard statistics: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('/logs')
+  async getProcessingLogs(
+    @Query('skip') skip: number = 0,
+    @Query('limit') limit: number = 50,
+    @Query('filterType') filterType: FilterType = FilterType.ALL,
+    @Query('value') value?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ): Promise<ApiResponseDto> {
+    try {
+      if (skip < 0) {
+        throw new HttpException('Skip must be a non-negative number', HttpStatus.BAD_REQUEST);
+      }
+
+      if (limit < 1 || limit > 1000) {
+        throw new HttpException('Limit must be between 1 and 1000', HttpStatus.BAD_REQUEST);
+      }
+
+      const filters: any = {};
+
+      switch (filterType) {
+        case FilterType.ALL:
+          // No additional filters needed
+          break;
+        case FilterType.OLPN:
+          if (!value) {
+            throw new HttpException('OLPN value is required for OLPN filter', HttpStatus.BAD_REQUEST);
+          }
+          filters.olpn = value;
+          break;
+        case FilterType.TOTE_ID:
+          if (!value) {
+            throw new HttpException('Tote ID value is required for Tote ID filter', HttpStatus.BAD_REQUEST);
+          }
+          filters.toteId = value;
+          break;
+        case FilterType.DATE:
+          if (!value) {
+            throw new HttpException('Date value is required for date filter', HttpStatus.BAD_REQUEST);
+          }
+          const date = new Date(value);
+          if (isNaN(date.getTime())) {
+            throw new HttpException('Invalid date format', HttpStatus.BAD_REQUEST);
+          }
+          filters.startDate = date;
+          filters.endDate = new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1); // End of day
+          break;
+        case FilterType.DATE_RANGE:
+          if (!startDate || !endDate) {
+            throw new HttpException('Start date and end date are required for date range filter', HttpStatus.BAD_REQUEST);
+          }
+          const start = new Date(startDate);
+          const end = new Date(endDate);
+          if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+            throw new HttpException('Invalid date format', HttpStatus.BAD_REQUEST);
+          }
+          if (start > end) {
+            throw new HttpException('Start date cannot be after end date', HttpStatus.BAD_REQUEST);
+          }
+          filters.startDate = start;
+          filters.endDate = end;
+          break;
+        default:
+          throw new HttpException('Invalid filter type', HttpStatus.BAD_REQUEST);
+      }
+
+      // Calculate page number for serial number calculation
+      const pageNum = Math.floor(skip / limit) + 1;
+      const result = await this.tripProcessingLogService.getFilteredLogs(pageNum, limit, filters);
+      
+      return {
+        success: true,
+        result: {
+          logs: result.logs.map((log, index) => ({
+            sno: skip + index + 1,
+            toteId: log.toteId,
+            olpn: log.olpn,
+            timestamp: log.timestamp,
+            status: log.status,
+            errorMessage: log.errorMessage || 'N/A',
+            errorDet: log.errors && log.errors.length > 0 ? log.errors[0].errorType : 'N/A',
+            workflowType: log.workflowType,
+            processingTimeMs: log.processingTimeMs,
+            createdAt: log.createdAt,
+            updatedAt: log.updatedAt,
+            errors: log.errors?.map(error => ({
+              id: error.id,
+              errorType: error.errorType,
+              errorMessage: error.errorMessage,
+              errorDetails: error.errorDetails,
+              step: error.step,
+              createdAt: error.createdAt
+            })) || []
+          })),
+          total: result.total,
+          skip: skip,
+          limit: limit,
+          totalPages: Math.ceil(result.total / limit)
+        }
+      };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      throw new HttpException(
+        `Failed to get processing logs: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('/export')
+  async exportLogsToExcel(
+    @Query('filterType') filterType: FilterType = FilterType.ALL,
+    @Query('value') value?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ): Promise<ApiResponseDto> {
+    try {
+      const filters: any = {};
+
+      switch (filterType) {
+        case FilterType.ALL:
+          // No additional filters needed
+          break;
+        case FilterType.OLPN:
+          if (!value) {
+            throw new HttpException('OLPN value is required for OLPN filter', HttpStatus.BAD_REQUEST);
+          }
+          filters.olpn = value;
+          break;
+        case FilterType.TOTE_ID:
+          if (!value) {
+            throw new HttpException('Tote ID value is required for Tote ID filter', HttpStatus.BAD_REQUEST);
+          }
+          filters.toteId = value;
+          break;
+        case FilterType.DATE:
+          if (!value) {
+            throw new HttpException('Date value is required for date filter', HttpStatus.BAD_REQUEST);
+          }
+          const date = new Date(value);
+          if (isNaN(date.getTime())) {
+            throw new HttpException('Invalid date format', HttpStatus.BAD_REQUEST);
+          }
+          filters.startDate = date;
+          filters.endDate = new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1); // End of day
+          break;
+        case FilterType.DATE_RANGE:
+          if (!startDate || !endDate) {
+            throw new HttpException('Start date and end date are required for date range filter', HttpStatus.BAD_REQUEST);
+          }
+          const start = new Date(startDate);
+          const end = new Date(endDate);
+          if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+            throw new HttpException('Invalid date format', HttpStatus.BAD_REQUEST);
+          }
+          if (start > end) {
+            throw new HttpException('Start date cannot be after end date', HttpStatus.BAD_REQUEST);
+          }
+          filters.startDate = start;
+          filters.endDate = end;
+          break;
+        default:
+          throw new HttpException('Invalid filter type', HttpStatus.BAD_REQUEST);
+      }
+
+      // Get all logs for export (no pagination)
+      const result = await this.tripProcessingLogService.getFilteredLogs(1, 10000, filters);
+
+      if (result.logs.length === 0) {
+        throw new HttpException('No logs found for the specified filters', HttpStatus.NOT_FOUND);
+      }
+
+      // Prepare data for Excel export matching UI columns
+      const excelData = result.logs.map((log, index) => ({
+        'S.NO': index + 1,
+        'TOTE ID': log.toteId || 'N/A',
+        'OLPN': log.olpn || 'N/A',
+        'TIMESTAMP': log.timestamp,
+        'STATUS': log.status,
+        'ERROR MESSAGE': log.errorMessage || 'N/A',
+        'ERROR DETAILS': log.errors && log.errors.length > 0 ? log.errors[0].errorType : 'N/A',
+        'PROCESSING TIME (MS)': log.processingTimeMs || 0,
+        'CREATED AT': log.createdAt,
+        'UPDATED AT': log.updatedAt
+      }));
+
+      // Create workbook and worksheet
+      const workbook = XLSX.utils.book_new();
+      const worksheet = XLSX.utils.json_to_sheet(excelData);
+
+      // Set column widths
+      const columnWidths = [
+        { wch: 8 },   // S.NO
+        { wch: 20 },  // TOTE ID
+        { wch: 20 },  // OLPN
+        { wch: 25 },  // TIMESTAMP
+        { wch: 12 },  // STATUS
+        { wch: 50 },  // ERROR MESSAGE
+        { wch: 15 },  // ERROR DETAILS
+        { wch: 20 },  // PROCESSING TIME
+        { wch: 20 },  // CREATED AT
+        { wch: 20 }   // UPDATED AT
+      ];
+      worksheet['!cols'] = columnWidths;
+
+      // Add worksheet to workbook
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Processing Logs');
+
+      // Generate filename and path
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+      const filename = `processing_logs_${filterType}_${timestamp}.xlsx`;
+      const exportsDir = path.join(process.cwd(), 'exports');
+      const filePath = path.join(exportsDir, filename);
+
+      // Create exports directory if it doesn't exist
+      if (!fs.existsSync(exportsDir)) {
+        fs.mkdirSync(exportsDir, { recursive: true });
+      }
+
+      // Write file to disk
+      XLSX.writeFile(workbook, filePath);
+
+      return {
+        success: true,
+        result: {
+          message: `Processing logs exported successfully`,
+          filename: filename,
+          downloadUrl: `${process.env.SERVER_URL}/trip-processing-logs/download/${filename}`,
+          totalRecords: result.logs.length,
+          fileSize: fs.statSync(filePath).size,
+          exportDate: new Date().toISOString(),
+          filterType: filterType,
+          filterValue: value || 'N/A'
+        }
+      };
+
+    } catch (error) {
+      console.error('Error exporting logs:', error);
+      
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      throw new HttpException(
+        `Failed to export logs: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('/download/:filename')
+  async downloadFile(@Param('filename') filename: string, @Res() res: Response) {
+    try {
+      const exportsDir = path.join(process.cwd(), 'exports');
+      const filePath = path.join(exportsDir, filename);
+
+      // Check if file exists
+      if (!fs.existsSync(filePath)) {
+        throw new HttpException('File not found', HttpStatus.NOT_FOUND);
+      }
+
+      // Set headers for file download
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', fs.statSync(filePath).size);
+
+      // Stream the file to response
+      const fileStream = fs.createReadStream(filePath);
+      fileStream.pipe(res);
+
+    } catch (error) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      throw new HttpException(
+        `Failed to download file: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }

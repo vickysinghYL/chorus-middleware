@@ -250,4 +250,105 @@ export class TripProcessingLogService {
       relations: ['errors']
     });
   }
+
+  /**
+   * Get dashboard statistics
+   */
+  async getDashboardStats(): Promise<{
+    totalErrors: number;
+    duplicateOlpn: number;
+    assetNotFound: number;
+    totalProcessed: number;
+    successful: number;
+    failed: number;
+  }> {
+    // Get total processed logs
+    const totalProcessed = await this.tripProcessingLogRepository.count();
+    
+    // Get successful and failed counts
+    const [successful, failed] = await Promise.all([
+      this.tripProcessingLogRepository.count({ where: { status: TripProcessingStatus.SUCCESS } }),
+      this.tripProcessingLogRepository.count({ where: { status: TripProcessingStatus.FAILED } })
+    ]);
+
+    // Get duplicate OLPN count (OLPNs that appear more than once)
+    const duplicateOlpnResult = await this.tripProcessingLogRepository
+      .createQueryBuilder('log')
+      .select('log.olpn', 'olpn')
+      .addSelect('COUNT(*)', 'count')
+      .where('log.olpn IS NOT NULL')
+      .groupBy('log.olpn')
+      .having('COUNT(*) > 1')
+      .getRawMany();
+
+    const duplicateOlpn = duplicateOlpnResult.reduce((total, item) => total + parseInt(item.count), 0);
+
+    // Get asset not found errors from error details
+    const assetNotFound = await this.tripProcessingErrorRepository.count({
+      where: [
+        { errorType: 'ASSET_NOT_FOUND' },
+        { errorMessage: 'Asset not found' },
+        { errorMessage: 'asset not found' },
+        { errorMessage: 'Failed to start tracking' }
+      ]
+    });
+
+    // Total errors includes failed logs plus specific error types
+    const totalErrors = failed;
+
+    return {
+      totalErrors,
+      duplicateOlpn,
+      assetNotFound,
+      totalProcessed,
+      successful,
+      failed
+    };
+  }
+
+  /**
+   * Get filtered logs with pagination
+   */
+  async getFilteredLogs(
+    page: number = 1,
+    limit: number = 50,
+    filters?: {
+      olpn?: string;
+      toteId?: string;
+      startDate?: Date;
+      endDate?: Date;
+    }
+  ): Promise<{ logs: TripProcessingLog[]; total: number }> {
+    const queryBuilder = this.tripProcessingLogRepository.createQueryBuilder('log');
+
+    // Apply filters
+    if (filters?.olpn) {
+      queryBuilder.andWhere('log.olpn = :olpn', { olpn: filters.olpn });
+    }
+
+    if (filters?.toteId) {
+      queryBuilder.andWhere('log.toteId = :toteId', { toteId: filters.toteId });
+    }
+
+    if (filters?.startDate && filters?.endDate) {
+      queryBuilder.andWhere('log.createdAt BETWEEN :startDate AND :endDate', {
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+      });
+    }
+
+    // Order by created date descending (newest first)
+    queryBuilder.orderBy('log.createdAt', 'DESC');
+
+    // Apply pagination
+    const offset = (page - 1) * limit;
+    queryBuilder.skip(offset).take(limit);
+
+    // Include errors relation
+    queryBuilder.leftJoinAndSelect('log.errors', 'errors');
+
+    const [logs, total] = await queryBuilder.getManyAndCount();
+
+    return { logs, total };
+  }
 } 
