@@ -334,14 +334,14 @@ export class TripProcessingLogService {
     }
 
     if (filters?.startDate && filters?.endDate) {
-      queryBuilder.andWhere('log.createdAt BETWEEN :startDate AND :endDate', {
+      queryBuilder.andWhere('log.timestamp BETWEEN :startDate AND :endDate', {
         startDate: filters.startDate,
         endDate: filters.endDate,
       });
     }
 
-    // Order by created date descending (newest first)
-    queryBuilder.orderBy('log.createdAt', 'DESC');
+    // Order by timestamp descending (newest first)
+    queryBuilder.orderBy('log.timestamp', 'DESC');
 
     // Apply pagination
     const offset = (page - 1) * limit;
