@@ -285,7 +285,7 @@ export class TripProcessingLogController {
             timestamp: log.timestamp,
             status: log.status,
             errorMessage: log.errorMessage || 'N/A',
-            errorDet: log.errors && log.errors.length > 0 ? log.errors[0].errorType : 'N/A',
+            errorDet: log.errors && log.errors.length > 0 ? log.errors[0].errorDetails : 'N/A',
             workflowType: log.workflowType,
             processingTimeMs: log.processingTimeMs,
             createdAt: log.createdAt,
@@ -402,7 +402,7 @@ export class TripProcessingLogController {
         'TIMESTAMP': log.timestamp,
         'STATUS': log.status,
         'ERROR MESSAGE': log.errorMessage || 'N/A',
-        'ERROR DETAILS': log.errors && log.errors.length > 0 ? log.errors[0].errorType : 'N/A',
+        'ERROR DETAILS': log.errors && log.errors.length > 0 ? log.errors[0].errorDetails : 'N/A',
         'PROCESSING TIME (MS)': log.processingTimeMs || 0,
         'CREATED AT': log.createdAt,
         'UPDATED AT': log.updatedAt
