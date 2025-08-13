@@ -181,13 +181,19 @@ export class TripProcessingLogController {
   @Get('/dashboard-stats')
   async getDashboardStats(): Promise<ApiResponseDto> {
     try {
+      this.logger.log('[DashboardStats] Fetching dashboard statistics');
+      
       const stats = await this.tripProcessingLogService.getDashboardStats();
+      
+      this.logger.log(`[DashboardStats] Retrieved stats: totalErrors=${stats.totalErrors}, duplicateOlpn=${stats.duplicateOlpn}, assetNotFound=${stats.assetNotFound}, totalProcessed=${stats.totalProcessed}, successful=${stats.successful}, failed=${stats.failed}`);
       
       return {
         success: true,
         result: stats
       };
     } catch (error) {
+      this.logger.error('[DashboardStats] Error fetching dashboard statistics:', error);
+      
       throw new HttpException(
         `Failed to get dashboard statistics: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -505,7 +511,7 @@ export class TripProcessingLogController {
     }
   }
 
-  @Delete('/cleanup-exports')
+  @Delete('/cleanup-files')
   async cleanupExportFiles(): Promise<ApiResponseDto> {
     try {
       this.logger.log('[Cleanup] Starting cleanup of all export files');

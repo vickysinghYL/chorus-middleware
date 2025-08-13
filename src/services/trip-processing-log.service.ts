@@ -284,14 +284,17 @@ export class TripProcessingLogService {
     const duplicateOlpn = duplicateOlpnResult.reduce((total, item) => total + parseInt(item.count), 0);
 
     // Get asset not found errors from error details
-    const assetNotFound = await this.tripProcessingErrorRepository.count({
-      where: [
-        { errorType: 'ASSET_NOT_FOUND' },
-        { errorMessage: 'Asset not found' },
-        { errorMessage: 'asset not found' },
-        { errorMessage: 'Failed to start tracking' }
-      ]
-    });
+    // This includes both direct asset not found errors and Chorus API errors with asset not found
+    const assetNotFound = await this.tripProcessingErrorRepository
+      .createQueryBuilder('error')
+      .where('error.errorType = :errorType', { errorType: 'ASSET_NOT_FOUND' })
+      .orWhere('error.errorMessage LIKE :msg1', { msg1: '%Asset not found%' })
+      .orWhere('error.errorMessage LIKE :msg2', { msg2: '%asset not found%' })
+      .orWhere('error.errorMessage LIKE :msg3', { msg3: '%Failed to start tracking%' })
+      .orWhere('error.errorDetails LIKE :details1', { details1: '%Asset not found%' })
+      .orWhere('error.errorDetails LIKE :details2', { details2: '%asset not found%' })
+      .orWhere('error.errorDetails LIKE :details3', { details3: '%"code":5%' })
+      .getCount();
 
     // Total errors includes failed logs plus specific error types
     const totalErrors = failed;
