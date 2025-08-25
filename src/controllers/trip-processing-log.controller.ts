@@ -386,8 +386,8 @@ export class TripProcessingLogController {
       this.logger.log(`[Export] Computed filters: ${JSON.stringify(filters)}`);
       this.logger.log(`[Export] Target filename: ${filename}`);
 
-      // Get all logs for export (no pagination)
-      const result = await this.tripProcessingLogService.getFilteredLogs(1, 10000, filters);
+      // Get all logs for export (no pagination) - increased limit for large datasets
+      const result = await this.tripProcessingLogService.getFilteredLogs(1, 50000, filters);
       this.logger.log(`[Export] Fetched ${result.logs.length} records to export`);
 
       if (result.logs.length === 0) {
@@ -473,6 +473,224 @@ export class TripProcessingLogController {
         `Failed to export logs: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR
       );
+    }
+  }
+
+  @Post('/export-async')
+  async exportLogsToExcelAsync(
+    @Body() request: {
+      filterType: FilterType;
+      value?: string;
+      startDate?: string;
+      endDate?: string;
+      email?: string;
+    }
+  ): Promise<ApiResponseDto> {
+    try {
+      const { filterType, value, startDate, endDate, email } = request;
+      
+      this.logger.log(`[ExportAsync] Starting async export with params: filterType=${filterType}, value=${value}, startDate=${startDate}, endDate=${endDate}`);
+
+      // Validate request
+      if (!filterType) {
+        throw new HttpException('Filter type is required', HttpStatus.BAD_REQUEST);
+      }
+
+      // Generate unique export ID
+      const exportId = `export_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Start background processing
+      this.processExportInBackground(exportId, filterType, value, startDate, endDate, email);
+
+      return {
+        success: true,
+        result: {
+          message: 'Export started in background',
+          exportId: exportId,
+          status: 'PROCESSING',
+          estimatedTime: '5-10 minutes for large datasets'
+        }
+      };
+
+    } catch (error) {
+      this.logger.error('[ExportAsync] Error starting async export:', error);
+      
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      
+      throw new HttpException(
+        `Failed to start export: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('/export-status/:exportId')
+  async getExportStatus(@Param('exportId') exportId: string): Promise<ApiResponseDto> {
+    try {
+      // Check if export file exists
+      const exportsDir = path.join(process.cwd(), 'exports');
+      const exportFiles = fs.readdirSync(exportsDir);
+      const exportFile = exportFiles.find(file => file.includes(exportId));
+
+      if (exportFile) {
+        const filePath = path.join(exportsDir, exportFile);
+        const stats = fs.statSync(filePath);
+        
+        return {
+          success: true,
+          result: {
+            exportId: exportId,
+            status: 'COMPLETED',
+            filename: exportFile,
+            downloadUrl: `/trip-processing-logs/download/${exportFile}`,
+            fileSize: stats.size,
+            completedAt: stats.mtime.toISOString()
+          }
+        };
+      } else {
+        return {
+          success: true,
+          result: {
+            exportId: exportId,
+            status: 'PROCESSING',
+            message: 'Export is still being processed'
+          }
+        };
+      }
+
+    } catch (error) {
+      this.logger.error(`[ExportStatus] Error checking status for ${exportId}:`, error);
+      
+      throw new HttpException(
+        `Failed to check export status: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  private async processExportInBackground(
+    exportId: string,
+    filterType: FilterType,
+    value?: string,
+    startDate?: string,
+    endDate?: string,
+    email?: string
+  ): Promise<void> {
+    try {
+      this.logger.log(`[ExportBackground] Starting background export: ${exportId}`);
+
+      const filters: any = {};
+      let filename = '';
+
+      // Apply filters (same logic as sync export)
+      switch (filterType) {
+        case FilterType.ALL:
+          filename = `processing_logs_all_${exportId}.xlsx`;
+          break;
+        case FilterType.OLPN:
+          if (!value) throw new Error('OLPN value is required');
+          filters.olpn = value;
+          filename = `processing_logs_olpn_${value}_${exportId}.xlsx`;
+          break;
+        case FilterType.TOTE_ID:
+          if (!value) throw new Error('Tote ID value is required');
+          filters.toteId = value;
+          filename = `processing_logs_toteId_${value}_${exportId}.xlsx`;
+          break;
+        case FilterType.DATE:
+          if (!value) throw new Error('Date value is required');
+          const date = new Date(value);
+          if (isNaN(date.getTime())) throw new Error('Invalid date format');
+          filters.startDate = date;
+          filters.endDate = new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1);
+          filename = `processing_logs_date_${value}_${exportId}.xlsx`;
+          break;
+        case FilterType.DATE_RANGE:
+          if (!startDate || !endDate) throw new Error('Start and end dates are required');
+          const start = new Date(startDate);
+          const end = new Date(endDate);
+          if (isNaN(start.getTime()) || isNaN(end.getTime())) throw new Error('Invalid date format');
+          if (start > end) throw new Error('Start date cannot be after end date');
+          filters.startDate = start;
+          filters.endDate = end;
+          filename = `processing_logs_dateRange_${startDate}_${endDate}_${exportId}.xlsx`;
+          break;
+        default:
+          throw new Error('Invalid filter type');
+      }
+
+      // Process in chunks for large datasets
+      const chunkSize = 10000;
+      let allLogs: any[] = [];
+      let page = 1;
+      let hasMore = true;
+
+      while (hasMore) {
+        this.logger.log(`[ExportBackground] Processing chunk ${page} for export ${exportId}`);
+        
+        const result = await this.tripProcessingLogService.getFilteredLogs(page, chunkSize, filters);
+        allLogs = allLogs.concat(result.logs);
+        
+        hasMore = result.logs.length === chunkSize;
+        page++;
+        
+        // Add delay to prevent overwhelming the database
+        if (hasMore) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+
+      this.logger.log(`[ExportBackground] Total records fetched: ${allLogs.length} for export ${exportId}`);
+
+      // Prepare Excel data
+      const excelData = allLogs.map((log, index) => ({
+        'S.NO': index + 1,
+        'TOTE ID': log.toteId || 'N/A',
+        'OLPN': log.olpn || 'N/A',
+        'TIMESTAMP': log.timestamp,
+        'STATUS': log.status,
+        'ERROR MESSAGE': log.errorMessage || 'N/A',
+        'ERROR DETAILS': log.errors && log.errors.length > 0 ? log.errors[0].errorDetails : 'N/A',
+        'PROCESSING TIME (MS)': log.processingTimeMs || 0,
+        'CREATED AT': log.createdAt,
+        'UPDATED AT': log.updatedAt
+      }));
+
+      // Create workbook and save
+      const workbook = XLSX.utils.book_new();
+      const worksheet = XLSX.utils.json_to_sheet(excelData);
+
+      // Set column widths
+      const columnWidths = [
+        { wch: 8 }, { wch: 20 }, { wch: 20 }, { wch: 25 }, { wch: 12 },
+        { wch: 50 }, { wch: 15 }, { wch: 20 }, { wch: 20 }, { wch: 20 }
+      ];
+      worksheet['!cols'] = columnWidths;
+
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Processing Logs');
+
+      const exportsDir = path.join(process.cwd(), 'exports');
+      const filePath = path.join(exportsDir, filename);
+
+      if (!fs.existsSync(exportsDir)) {
+        fs.mkdirSync(exportsDir, { recursive: true });
+      }
+
+      XLSX.writeFile(workbook, filePath);
+
+      this.logger.log(`[ExportBackground] Export completed: ${exportId}, file: ${filename}, records: ${allLogs.length}`);
+
+      // TODO: Send email notification if email provided
+      if (email) {
+        this.logger.log(`[ExportBackground] Email notification would be sent to: ${email}`);
+        // Implement email notification here
+      }
+
+    } catch (error) {
+      this.logger.error(`[ExportBackground] Error in background export ${exportId}:`, error);
+      // TODO: Store error status for the export
     }
   }
 

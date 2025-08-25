@@ -867,7 +867,16 @@ export class ChorusApiService {
   // MULTIPROCESSING WORKFLOW
   // ===========================
 
-  async executeTripWorkflowMultiProcess(sortedTripData: TripData[]): Promise<WorkflowResult> {
+  async executeTripWorkflowMultiProcess(tripData: TripData[]): Promise<WorkflowResult> {
+    const sortedTripData = [...tripData].sort((a, b) => {
+      const timestampA = new Date(a.timestamp).getTime();
+      const timestampB = new Date(b.timestamp).getTime();
+      return timestampA - timestampB;
+    });
+
+    console.log(`Sorted ${sortedTripData.length} trip data entries by timestamp (ascending)`);
+    console.log('First entry:', sortedTripData[0]);
+    console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
 
     const workflowStartTime = Date.now();
     this.logger.log(`${this.TAG}: Starting 'Multi-Process Trip Workflow' for ${sortedTripData.length} trip data entries.`);
@@ -880,7 +889,7 @@ export class ChorusApiService {
     try {
       // Determine optimal number of workers based on CPU cores
       const cpuCores = os.cpus().length;
-      const maxWorkers = Math.min(2, cpuCores); // Use 2 workers max for 2 CPU server
+      const maxWorkers = Math.min(cpuCores,10); // Use 2 workers max for 2 CPU server
       const chunkSize = Math.ceil(sortedTripData.length / maxWorkers);
       
       this.logger.log(`${this.TAG}: Using ${maxWorkers} workers for parallel processing`);

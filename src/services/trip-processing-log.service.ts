@@ -39,6 +39,20 @@ export class TripProcessingLogService {
   }
 
   /**
+   * Check if combination of toteId, olpn, and timestamp already exists in the database
+   */
+  async isTripDataDuplicate(toteId: string, olpn: string, timestamp: string): Promise<boolean> {
+    const existingLog = await this.tripProcessingLogRepository.findOne({
+      where: { 
+        toteId,
+        olpn,
+        timestamp: new Date(timestamp)
+      }
+    });
+    return !!existingLog;
+  }
+
+  /**
    * Create a new trip processing log entry
    */
   async createTripProcessingLog(

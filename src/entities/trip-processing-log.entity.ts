@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany, Index } from 'typeorm';
 import { TripProcessingError } from './trip-processing-error.entity';
 
 export enum TripProcessingStatus {
@@ -7,6 +7,11 @@ export enum TripProcessingStatus {
 }
 
 @Entity('trip_processing_logs')
+@Index(['timestamp']) // Index for date filtering
+@Index(['olpn']) // Index for OLPN filtering
+@Index(['toteId']) // Index for Tote ID filtering
+@Index(['status']) // Index for status filtering
+@Index(['timestamp', 'status']) // Composite index for date + status queries
 export class TripProcessingLog {
   @PrimaryGeneratedColumn()
   id: number;

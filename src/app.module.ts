@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
+import { HttpModule } from '@nestjs/axios';
 import { ChorusApiService } from './services/chorus-api.service';
 import { ChorusController } from './controllers/chorus.controller';
 import { ErrorLogService } from './services/error-log.service';
@@ -9,6 +11,7 @@ import { ChorusErrorLog } from './entities/chorus-error-log.entity';
 import { TripProcessingLog } from './entities/trip-processing-log.entity';
 import { TripProcessingError } from './entities/trip-processing-error.entity';
 import { TripProcessingLogService } from './services/trip-processing-log.service';
+import { CronJobService } from './services/cron-job.service';
 import { join } from 'path';
 import { TripProcessingLogController } from './controllers/trip-processing-log.controller';
 
@@ -18,6 +21,8 @@ import { TripProcessingLogController } from './controllers/trip-processing-log.c
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ScheduleModule.forRoot(),
+    HttpModule,
     TypeOrmModule.forRoot({
         type: 'postgres',
         host: process.env.POSTGRES_HOST,
