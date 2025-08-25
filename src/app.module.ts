@@ -38,6 +38,6 @@ import { TripProcessingLogController } from './controllers/trip-processing-log.c
     TypeOrmModule.forFeature([ChorusErrorLog, TripProcessingLog, TripProcessingError]),
   ],
   controllers: [ChorusController, ErrorLogController, TripProcessingLogController],
-  providers: [ChorusApiService, ErrorLogService, TripProcessingLogService],
+  providers: [ChorusApiService, ErrorLogService, TripProcessingLogService, CronJobService],
 })
 export class AppModule {} 

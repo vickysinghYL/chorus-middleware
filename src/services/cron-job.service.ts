@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { ChorusApiService } from './chorus-api.service';
 import { TripProcessingLogService } from './trip-processing-log.service';
+import { CronJobEnum } from 'src/enums/cron.enum';
 
 interface ApiResponse {
   summary: {
@@ -39,7 +40,7 @@ export class CronJobService {
    * Cron job that runs every hour
    * Fetches data from the last hour and processes it
    */
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronJobEnum.EVERY_HOUR)
   async handleCronJob() {
     this.logger.log('Starting scheduled cron job - fetching last hour of data');
     
