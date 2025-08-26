@@ -616,8 +616,43 @@ export class ChorusApiService {
       // Step 1: List Trips (IN_TRANSIT) using ToteID
       this.logger.log(`${this.TAG}: Step 1 - Listing trips in transit for ${toteId}...`);
       tripLog.push(`Step 1 - Listing trips in transit for ${toteId}...`);
-      
-      const { customerIds, toteOlpnPairs } = await this.listAllTripsInTransit(toteId);
+
+      let customerIds: string[] = [];
+      let toteOlpnPairs: [string, string][] = [];
+      try {
+        const result = await this.listAllTripsInTransit(toteId);
+        customerIds = result.customerIds;
+        toteOlpnPairs = result.toteOlpnPairs;
+      } catch (error) {
+        this.logger.error(`${this.TAG}: Error listing trips in transit for ${toteId}: ${error.message}`);
+        tripLog.push(`ERROR: Failed to list trips in transit for ${toteId}: ${error.message}`);
+        tripErrors++;
+
+        errors.push({
+          errorType: 'API_ERROR',
+          errorMessage: `Failed to list trips in transit for ${toteId}`,
+          errorDetails: error.message,
+          step: 'List Trips In Transit',
+          requestPayload: { toteId }
+        });
+
+        await this.logWorkflowError(error, {
+          workflowName: 'Trip Workflow',
+          toteId,
+          olpn,
+          step: 'List Trips In Transit',
+          requestPayload: { toteId }
+        });
+
+        // Early return for this tripData; caller will continue with others
+        const processingTimeMs = Date.now() - startTime;
+        return {
+          success: false,
+          errorMessage: `Failed to list trips in transit for ${toteId}`,
+          processingTimeMs,
+          errors
+        };
+      }
       tripLog.push(`Found ${customerIds.length} existing trips in transit for ${toteId}`);
       this.logger.log(`Found ${customerIds.length} existing trips: ${customerIds.join(', ')}`);
       
@@ -636,6 +671,22 @@ export class ChorusApiService {
           // Safety check to ensure toteOlpnPairs[i] exists
           if (!toteOlpnPairs[i]) {
             this.logger.error(`${this.TAG}: Missing toteOlpnPairs entry for index ${i}`);
+            tripErrors++;
+            existingTripsFailed = true;
+            errors.push({
+              errorType: 'DATA_MISMATCH',
+              errorMessage: `Missing tote/olpn pair at index ${i}`,
+              errorDetails: `Missing tote/olpn pair at index ${i}`,
+              step: 'Process Existing Trip',
+              requestPayload: { index: i, oldOlpn }
+            });
+            await this.logWorkflowError(new Error(`Missing tote/olpn pair at index ${i}`), {
+              workflowName: 'Trip Workflow',
+              toteId,
+              olpn,
+              step: 'Process Existing Trip',
+              requestPayload: { index: i, oldOlpn }
+            });
             continue;
           }
           
@@ -644,6 +695,22 @@ export class ChorusApiService {
           // Additional safety check for the destructured values
           if (!currentToteId || !currentOlpn) {
             this.logger.error(`${this.TAG}: Invalid toteOlpnPairs entry at index ${i}: [${currentToteId}, ${currentOlpn}]`);
+            tripErrors++;
+            existingTripsFailed = true;
+            errors.push({
+              errorType: 'DATA_MISMATCH',
+              errorMessage: `Invalid tote/olpn pair at index ${i}`,
+              errorDetails: `Invalid tote/olpn pair at index ${i}: [${currentToteId}, ${currentOlpn}]`,
+              step: 'Process Existing Trip',
+              requestPayload: { index: i, oldOlpn }
+            });
+            await this.logWorkflowError(new Error(`Invalid tote/olpn pair at index ${i}`), {
+              workflowName: 'Trip Workflow',
+              toteId,
+              olpn,
+              step: 'Process Existing Trip',
+              requestPayload: { index: i, oldOlpn }
+            });
             continue;
           }
           
@@ -676,6 +743,14 @@ export class ChorusApiService {
               requestPayload: { oldOlpn, currentToteId, currentOlpn, timestamp }
             });
 
+            await this.logWorkflowError(error, {
+              workflowName: 'Trip Workflow',
+              toteId: currentToteId,
+              olpn: currentOlpn,
+              step: 'Process Existing Trip',
+              requestPayload: { oldOlpn, currentToteId, currentOlpn, timestamp }
+            });
+
             // If status update fails, skip remaining steps for this pair but continue with next pair
             this.logger.log(`  Skipping remaining steps for ${toteId}/${olpn} due to status update failure`);
             tripLog.push(`  Skipping remaining steps for ${toteId}/${olpn} due to status update failure`);
@@ -704,6 +779,13 @@ export class ChorusApiService {
               step: 'Process Existing Trip',
               requestPayload: { oldOlpn, currentToteId, currentOlpn, timestamp }
             });
+            await this.logWorkflowError(error, {
+              workflowName: 'Trip Workflow',
+              toteId: currentToteId,
+              olpn: currentOlpn,
+              step: 'Process Existing Trip',
+              requestPayload: { oldOlpn, currentToteId, currentOlpn, timestamp }
+            });
             
             // If status update fails, skip remaining steps for this pair but continue with next pair
             this.logger.log(`  Skipping remaining steps for ${toteId}/${olpn} due to trip ending failure`);
@@ -725,6 +807,13 @@ export class ChorusApiService {
       } else {
         this.logger.log(`${this.TAG}: Step 4 - Skipping new trip creation for ${olpn} due to existing trip processing failures`);
         tripLog.push(`Step 4 - Skipping new trip creation for ${olpn} due to existing trip processing failures`);
+        await this.logWorkflowError(new Error('Existing trip processing failures'), {
+          workflowName: 'Trip Workflow',
+          toteId,
+          olpn,
+          step: 'Create New Trip Skipped',
+          requestPayload: { toteId, olpn }
+        });
         
         const processingTimeMs = Date.now() - startTime;
         return { 
@@ -744,7 +833,7 @@ export class ChorusApiService {
         await this.delay(100);
         
       } catch (error) {
-        this.logger.log(`  ERROR: Failed to create new trip for ${olpn}: ${error.message}`);
+        this.logger.error(`  ERROR: Failed to create new trip for ${olpn}: ${error.message}`);
         tripLog.push(`  ERROR: Failed to create new trip for ${olpn}: ${error.message}`);
         tripErrors++;
         
@@ -752,6 +841,13 @@ export class ChorusApiService {
           errorType: 'API_ERROR',
           errorMessage: `Failed to create new trip for ${olpn}`,
           errorDetails: error.message,
+          step: 'Create New Trip',
+          requestPayload: { olpn, timestamp }
+        });
+        await this.logWorkflowError(error, {
+          workflowName: 'Trip Workflow',
+          toteId,
+          olpn,
           step: 'Create New Trip',
           requestPayload: { olpn, timestamp }
         });
@@ -778,7 +874,7 @@ export class ChorusApiService {
         await this.delay(100);
         
       } catch (error) {
-        this.logger.log(`  ERROR: Failed to start tracking for ${toteId}/${olpn}: ${error.message}`);
+        this.logger.error(`  ERROR: Failed to start tracking for ${toteId}/${olpn}: ${error.message}`);
         tripLog.push(`  ERROR: Failed to start tracking for ${toteId}/${olpn}: ${error.message}`);
         tripErrors++;
         
@@ -786,6 +882,13 @@ export class ChorusApiService {
           errorType: 'API_ERROR',
           errorMessage: `Failed to start tracking for ${toteId}/${olpn}`,
           errorDetails: error.message,
+          step: 'Start Tracking',
+          requestPayload: { toteId, olpn }
+        });
+        await this.logWorkflowError(error, {
+          workflowName: 'Trip Workflow',
+          toteId,
+          olpn,
           step: 'Start Tracking',
           requestPayload: { toteId, olpn }
         });
@@ -809,7 +912,7 @@ export class ChorusApiService {
         tripLog.push(`Trip status updated to IN_TRANSIT for ${olpn}`);
         
       } catch (error) {
-        this.logger.log(`  ERROR: Failed to update trip status to IN_TRANSIT for ${olpn}: ${error.message}`);
+        this.logger.error(`  ERROR: Failed to update trip status to IN_TRANSIT for ${olpn}: ${error.message}`);
         tripLog.push(`  ERROR: Failed to update trip status to IN_TRANSIT for ${olpn}: ${error.message}`);
         tripErrors++;
         
@@ -817,6 +920,13 @@ export class ChorusApiService {
           errorType: 'API_ERROR',
           errorMessage: `Failed to update trip status to IN_TRANSIT for ${olpn}`,
           errorDetails: error.message,
+          step: 'Update Trip Status',
+          requestPayload: { olpn, timestamp }
+        });
+        await this.logWorkflowError(error, {
+          workflowName: 'Trip Workflow',
+          toteId,
+          olpn,
           step: 'Update Trip Status',
           requestPayload: { olpn, timestamp }
         });
@@ -1053,7 +1163,29 @@ export class ChorusApiService {
         this.logger.log(`${this.TAG}: [WORKER ${chunkIndex + 1}] Step 1 - Listing trips in transit for ${toteId}...`);
         tripLog.push(`[WORKER ${chunkIndex + 1}] Step 1 - Listing trips in transit for ${toteId}...`);
         
-        const { customerIds, toteOlpnPairs } = await this.listAllTripsInTransit(toteId);
+        let customerIds: string[] = [];
+        let toteOlpnPairs: [string, string][] = [];
+        try {
+          const result = await this.listAllTripsInTransit(toteId);
+          customerIds = result.customerIds;
+          toteOlpnPairs = result.toteOlpnPairs;
+        } catch (error) {
+          this.logger.error(`${this.TAG}: [WORKER ${chunkIndex + 1}] Error listing trips in transit for ${toteId}: ${error.message}`);
+          tripLog.push(`[WORKER ${chunkIndex + 1}] ERROR: Failed to list trips in transit for ${toteId}: ${error.message}`);
+          tripErrors++;
+
+          await this.logWorkflowError(error, {
+            workflowName: 'Multi-Process Trip Workflow',
+            toteId,
+            olpn,
+            step: 'List Trips In Transit',
+            requestPayload: { toteId }
+          });
+
+          // Skip this tripData and continue with next in the chunk
+          chunkErrors++;
+          continue;
+        }
         tripLog.push(`Found ${customerIds.length} existing trips in transit for ${toteId}`);
         
         // Track if any existing trip processing fails

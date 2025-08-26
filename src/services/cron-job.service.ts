@@ -42,17 +42,19 @@ export class CronJobService {
    */
   @Cron(CronJobEnum.EVERY_HOUR)
   async handleCronJob() {
-    this.logger.log('Starting scheduled cron job - fetching last hour of data');
+    this.logger.log('Starting scheduled cron job - fetching last hour of data (with overlap)');
     
     try {
-      // Calculate date range for last hour in UTC
+      // Calculate date range for last hour in UTC with overlap buffer and safety lag
+      // Start = now - 65 minutes (overlap), End = now - 5 minutes (lag)
       const now = new Date();
-      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+      const startWindow = new Date(now.getTime() - 65 * 60 * 1000);
+      const endWindow = new Date(now.getTime() - 5 * 60 * 1000);
       
-      const startDate = oneHourAgo.toISOString().split('T')[0];
-      const startTime = oneHourAgo.toISOString().split('T')[1].substring(0, 5);
-      const endDate = now.toISOString().split('T')[0];
-      const endTime = now.toISOString().split('T')[1].substring(0, 5);
+      const startDate = startWindow.toISOString().split('T')[0];
+      const startTime = startWindow.toISOString().split('T')[1].substring(0, 5);
+      const endDate = endWindow.toISOString().split('T')[0];
+      const endTime = endWindow.toISOString().split('T')[1].substring(0, 5);
       
       this.logger.log(`Fetching data from ${startDate}T${startTime} to ${endDate}T${endTime} UTC`);
       
