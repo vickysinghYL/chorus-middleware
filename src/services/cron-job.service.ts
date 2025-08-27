@@ -147,7 +147,7 @@ export class CronJobService {
       }
       
       // Check olpn pattern: 8-20 digits
-      const olpnPattern = /^[0-9]{8,20}$/;
+      const olpnPattern = /^[0-9]{20}$/;
       if (!olpnPattern.test(item.olpn || '')) {
         return false;
       }
