@@ -79,7 +79,7 @@ export class CronJobService {
       this.logger.log(`Found ${newTripData.length} new trip data entries to process`);
       
       // Process the new trip data
-      const result = await this.chorusApiService.executeTripWorkflowMultiProcess(newTripData);
+      const result = await this.chorusApiService.executeTripWorkflow(newTripData);
       
       this.logger.log(`Cron job completed successfully`);
       this.logger.log(`Processed: ${result.summary.processed}, Errors: ${result.summary.errors}`);

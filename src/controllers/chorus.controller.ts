@@ -86,19 +86,10 @@ export class ChorusController {
         }
       }
 
-      const sortedTripData = [...request.tripData].sort((a, b) => {
-        const timestampA = new Date(a.timestamp).getTime();
-        const timestampB = new Date(b.timestamp).getTime();
-        return timestampA - timestampB;
-      });
-
-      console.log(`Sorted ${sortedTripData.length} trip data entries by timestamp (ascending)`);
-      console.log('First entry:', sortedTripData[0]);
-      console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
 
 
     // Execute the workflow (sorting will be done in service)
-    this.chorusApiService.executeTripWorkflow(sortedTripData);
+    this.chorusApiService.executeTripWorkflow(request.tripData);
       
     return { success: true, data: 'Trip workflow executed successfully' };
     } catch (error) {

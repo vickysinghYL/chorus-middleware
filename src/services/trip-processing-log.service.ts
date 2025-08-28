@@ -147,8 +147,8 @@ export class TripProcessingLogService {
       }
 
       // Process the trip data
-      const result = await processingFunction(tripData);
       const processingTimeMs = Date.now() - startTime;
+      const result = await processingFunction(tripData);
 
       // Create log entry
       const status = result.success ? TripProcessingStatus.SUCCESS : TripProcessingStatus.FAILED;

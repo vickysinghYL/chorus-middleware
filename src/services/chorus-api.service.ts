@@ -505,7 +505,15 @@ export class ChorusApiService {
   // TRIP WORKFLOW EXECUTION (Following Flowchart)
   // ===========================
 
-  async executeTripWorkflow(sortedTripData: TripData[]) {
+  async executeTripWorkflow(tripData: TripData[]) {
+    const sortedTripData = [...tripData].sort((a, b) => {
+      const timestampA = new Date(a.timestamp).getTime();
+      const timestampB = new Date(b.timestamp).getTime();
+      return timestampA - timestampB;
+    });
+    console.log(`Sorted ${sortedTripData.length} trip data entries by timestamp (ascending)`);
+    console.log('First entry:', sortedTripData[0]);
+    console.log('Last entry:', sortedTripData[sortedTripData.length - 1]);
     
 
     const workflowStartTime = Date.now();
@@ -597,6 +605,12 @@ export class ChorusApiService {
     }
   }
 
+  /**
+   * Process a single trip data entry with sequential API calls.
+   * Each API call is awaited and will not proceed to the next step until completion.
+   * All API calls have proper error handling and will return early on failure.
+   * No delays are needed as backend APIs process data synchronously before responding.
+   */
   private async processSingleTripData(tripData: TripData, index: number, totalCount: number): Promise<{
     success: boolean;
     errorMessage?: string;
@@ -620,9 +634,16 @@ export class ChorusApiService {
       let customerIds: string[] = [];
       let toteOlpnPairs: [string, string][] = [];
       try {
+        this.logger.log(`  Calling listAllTripsInTransit API for ${toteId}...`);
+        tripLog.push(`  Calling listAllTripsInTransit API for ${toteId}...`);
+        
         const result = await this.listAllTripsInTransit(toteId);
         customerIds = result.customerIds;
         toteOlpnPairs = result.toteOlpnPairs;
+        
+        this.logger.log(`  API call completed for ${toteId}`);
+        tripLog.push(`  API call completed for ${toteId}`);
+        
       } catch (error) {
         this.logger.error(`${this.TAG}: Error listing trips in transit for ${toteId}: ${error.message}`);
         tripLog.push(`ERROR: Failed to list trips in transit for ${toteId}: ${error.message}`);
@@ -722,13 +743,15 @@ export class ChorusApiService {
           tripLog.push(`Updating trip status to COMPLETED for ${oldOlpn}`);
           
           try {
+            this.logger.log(`    Calling endTrip API for ${oldOlpn}...`);
+            tripLog.push(`    Calling endTrip API for ${oldOlpn}...`);
+            
             await this.endTrip(oldOlpn, timestamp);
             this.logger.log(`    Trip status updated to COMPLETED for ${oldOlpn}`);
             tripLog.push(`    Trip status updated to COMPLETED for ${oldOlpn}`);
             
             // Small delay to ensure status update is processed
             await this.delay(100);
-            
           } catch (error) {
             this.logger.error(`    ERROR: Failed to update trip status to COMPLETED for ${oldOlpn}: ${error.message}`);
             tripLog.push(`    ERROR: Failed to update trip status to COMPLETED for ${oldOlpn}: ${error.message}`);
@@ -762,6 +785,9 @@ export class ChorusApiService {
           tripLog.push(`    Ending trip for pair: ${currentToteId}/${currentOlpn}`);
           
           try {
+            this.logger.log(`    Calling endTracking API for ${currentToteId}/${currentOlpn}...`);
+            tripLog.push(`    Calling endTracking API for ${currentToteId}/${currentOlpn}...`);
+            
             await this.endTracking(currentToteId, currentOlpn);
             this.logger.log(`    Trip ended successfully for ${currentToteId}/${currentOlpn}`);
             tripLog.push(`    Trip ended successfully for ${currentToteId}/${currentOlpn}`);
@@ -825,13 +851,16 @@ export class ChorusApiService {
       }
       
       try {
+        this.logger.log(`  Calling createTrip API for ${olpn}...`);
+        tripLog.push(`  Calling createTrip API for ${olpn}...`);
+        
         await this.createTrip(olpn, timestamp);
         this.logger.log(`  New trip created successfully for ${olpn}`);
         tripLog.push(`  New trip created successfully for ${olpn}`);
         
         // Small delay to ensure trip creation is processed
         await this.delay(100);
-        
+
       } catch (error) {
         this.logger.error(`  ERROR: Failed to create new trip for ${olpn}: ${error.message}`);
         tripLog.push(`  ERROR: Failed to create new trip for ${olpn}: ${error.message}`);
@@ -866,6 +895,9 @@ export class ChorusApiService {
       tripLog.push(`Step 5 - Starting tracking for ${toteId}/${olpn}`);
       
       try {
+        this.logger.log(`  Calling startTracking API for ${toteId}/${olpn}...`);
+        tripLog.push(`  Calling startTracking API for ${toteId}/${olpn}...`);
+        
         await this.startTracking(toteId, olpn);
         this.logger.log(`  Tracking started successfully for ${toteId}/${olpn}`);
         tripLog.push(`  Tracking started successfully for ${toteId}/${olpn}`);
@@ -907,6 +939,9 @@ export class ChorusApiService {
       tripLog.push(`Step 6 - Updating trip status to IN_TRANSIT for ${olpn}`);
       
       try {
+        this.logger.log(`  Calling updateTripToInTransit API for ${olpn}...`);
+        tripLog.push(`  Calling updateTripToInTransit API for ${olpn}...`);
+        
         await this.updateTripToInTransit(olpn, timestamp);
         this.logger.log(`Trip status updated to IN_TRANSIT for ${olpn}`);
         tripLog.push(`Trip status updated to IN_TRANSIT for ${olpn}`);
