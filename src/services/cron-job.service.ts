@@ -6,6 +6,37 @@ import { ChorusApiService } from './chorus-api.service';
 import { TripProcessingLogService } from './trip-processing-log.service';
 import { CronJobEnum } from 'src/enums/cron.enum';
 
+interface FilteredApiResponse {
+  success: boolean;
+  data: Array<{
+    sequence: number;
+    tote_id: string;
+    olpn: string;
+    first_timestamp: string;
+    status: string;
+  }>;
+  metadata: {
+    total_raw_records: number;
+    datetime_filtered_records: number;
+    final_filtered_records: number;
+    deduplication_stats?: {
+      total_raw_records: number;
+      valid_pattern_records: number;
+      duplicates_removed: number;
+      tote_cross_contaminations: number;
+      olpn_cross_contaminations: number;
+      first_occurrences_kept: number;
+      final_data_quality_percent: number;
+    };
+    data_quality_percent: number;
+  };
+  query_info: {
+    start_datetime_utc: string;
+    end_datetime_utc: string;
+    processing_timestamp: string;
+  };
+}
+
 interface ApiResponse {
   summary: {
     dateRange: string;
@@ -28,7 +59,7 @@ interface TripData {
 @Injectable()
 export class CronJobService {
   private readonly logger = new Logger(CronJobService.name);
-  private readonly API_BASE_URL = 'http://3.91.8.133:3000';
+  private readonly API_BASE_URL = 'http://3.91.8.133:4300';
 
   constructor(
     private readonly httpService: HttpService,
@@ -66,9 +97,9 @@ export class CronJobService {
         return;
       }
       
-      this.logger.log(`Found ${apiData.tripData.length} trip data entries`);
+      this.logger.log(`Found ${apiData.tripData.length} trip data entries from filtered API`);
       
-      // Filter out existing records
+      // Filter out existing records (API already handles deduplication, but check our database)
       const newTripData = await this.filterNewTripData(apiData.tripData);
       
       if (newTripData.length === 0) {
@@ -79,10 +110,10 @@ export class CronJobService {
       this.logger.log(`Found ${newTripData.length} new trip data entries to process`);
       
       // Process the new trip data
-      const result = await this.chorusApiService.executeTripWorkflow(newTripData);
+      // const result = await this.chorusApiService.executeTripWorkflow(newTripData);
       
       this.logger.log(`Cron job completed successfully`);
-      this.logger.log(`Processed: ${result.summary.processed}, Errors: ${result.summary.errors}`);
+      // this.logger.log(`Processed: ${result.summary.processed}, Errors: ${result.summary.errors}`);
       
     } catch (error) {
       this.logger.error('Cron job failed:', error);
@@ -90,7 +121,7 @@ export class CronJobService {
   }
 
   /**
-   * Fetch data from the API with the specified date range
+   * Fetch data from the filtered API with the specified date range
    */
   private async fetchDataFromApi(
     startDate: string,
@@ -98,37 +129,69 @@ export class CronJobService {
     endDate: string,
     endTime: string
   ): Promise<ApiResponse> {
-    const startDatetime = `${startDate}T${startTime}:00.000Z`;
-    const endDatetime = `${endDate}T${endTime}:59.999Z`;
-    
-    this.logger.log(`Fetching data from API: ${startDatetime} to ${endDatetime}`);
+    this.logger.log(`Fetching filtered data from API: ${startDate} ${startTime} to ${endDate} ${endTime}`);
     
     try {
       const response = await firstValueFrom(
-        this.httpService.get(`${this.API_BASE_URL}/api/associations`, {
+        this.httpService.get(`${this.API_BASE_URL}/api/filtered-associations`, {
           params: {
-            page: 1,
-            limit: 150000,
-            includeIncomplete: true
+            start_date: startDate,
+            start_time: startTime,
+            end_date: endDate,
+            end_time: endTime
           }
         })
       );
 
-      // Process the response using jq-like logic
-      const processedData = this.processApiResponse(response.data, startDatetime, endDatetime);
+      // Process the filtered response
+      const processedData = this.processFilteredApiResponse(response.data);
       
-      this.logger.log(`API response processed: ${processedData.tripData.length} valid entries`);
+      this.logger.log(`Filtered API response processed: ${processedData.tripData.length} valid entries`);
+      this.logger.log(`Data quality: ${response.data.metadata.data_quality_percent}%`);
+      
+      // Log deduplication stats if available
+      if (response.data.metadata.deduplication_stats) {
+        this.logger.log(`Deduplication stats: ${response.data.metadata.deduplication_stats.duplicates_removed} duplicates removed`);
+      } else {
+        this.logger.log(`No deduplication stats available (likely no data found)`);
+      }
       
       return processedData;
       
     } catch (error) {
-      this.logger.error('Failed to fetch data from API:', error);
+      this.logger.error('Failed to fetch data from filtered API:', error);
       throw error;
     }
   }
 
   /**
-   * Process API response similar to the jq logic in the shell script
+   * Process filtered API response - data is already clean and validated
+   */
+  private processFilteredApiResponse(data: FilteredApiResponse): ApiResponse {
+    if (!data.success || !Array.isArray(data.data)) {
+      throw new Error('Invalid filtered API response format');
+    }
+    
+    // Transform filtered data to expected format
+    // Data is already validated, deduplicated, and sorted by the API
+    const tripData = data.data.map(item => ({
+      toteId: item.tote_id,
+      olpn: item.olpn,
+      timestamp: item.first_timestamp
+    }));
+    
+    return {
+      summary: {
+        dateRange: `${data.query_info.start_datetime_utc} to ${data.query_info.end_datetime_utc}`,
+        totalUniqueAssociations: tripData.length,
+        generatedAt: data.query_info.processing_timestamp
+      },
+      tripData
+    };
+  }
+
+  /**
+   * Process API response similar to the jq logic in the shell script (legacy method)
    */
   private processApiResponse(data: any, startDatetime: string, endDatetime: string): ApiResponse {
     // Extract data array (handle both direct array and nested data property)
@@ -190,9 +253,12 @@ export class CronJobService {
 
   /**
    * Filter out trip data that already exists in the database
+   * Note: The filtered API already handles deduplication, but we still check our database
    */
   private async filterNewTripData(tripData: TripData[]): Promise<TripData[]> {
     const newTripData: TripData[] = [];
+    
+    this.logger.log(`Checking ${tripData.length} trip data entries against database for duplicates`);
     
     for (const trip of tripData) {
       try {
@@ -213,6 +279,7 @@ export class CronJobService {
       }
     }
     
+    this.logger.log(`Found ${newTripData.length} new trip data entries (${tripData.length - newTripData.length} already processed)`);
     return newTripData;
   }
 
